@@ -178,6 +178,36 @@ def verify_worker(platform_key: str, python_root: Path) -> None:
     run([str(interpreter), str(ROOT / "python" / "smoke_test.py")], env=environment)
 
 
+def verify_application(
+    platform_key: str,
+    executable: Path,
+    python_root: Path,
+) -> None:
+    if not can_execute_target(platform_key):
+        return
+    environment = os.environ.copy()
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONPATH"] = str(python_root)
+    environment["DUAL_CORE_PASSPHRASE"] = "portable-package-smoke-passphrase"
+    environment.pop("PYMUPDF_PRO_KEY", None)
+    with tempfile.TemporaryDirectory(prefix="portable-doctor-") as working_directory:
+        result = subprocess.run(
+            [str(executable), "doctor"],
+            cwd=working_directory,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if result.returncode not in (0, 2):
+        raise RuntimeError(
+            f"packaged first-run diagnostics failed ({result.returncode}):\n{result.stdout}"
+        )
+    if "Bank templates" not in result.stdout or "0 template(s) found" in result.stdout:
+        raise RuntimeError(f"packaged templates are not discoverable:\n{result.stdout}")
+
+
 def write_bundle_manifest(bundle_root: Path, platform_key: str, revision: str, pdfium: dict[str, str]) -> None:
     files = []
     for path in sorted(bundle_root.rglob("*")):
@@ -313,6 +343,7 @@ def build(args: argparse.Namespace) -> Path:
         encoding="utf-8",
     )
     write_bundle_manifest(bundle_root, platform_key, args.revision, pdfium)
+    verify_application(platform_key, destination_binary, resources_directory / "python")
     print(bundle_root)
     return bundle_root
 
