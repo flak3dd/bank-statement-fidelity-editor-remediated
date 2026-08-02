@@ -1228,9 +1228,8 @@ impl AppModals for MyApp {
                     if let Some(action) = err.suggested_action() {
                         if action.contains("Settings") {
                             self.active_modal = ActiveModal::Settings;
-                        } else if action.contains("Typst") {
-                            // Tell user to set env var since engine_mode is config driven
-                            self.status = "Please restart app with PDF_ENGINE_MODE=typst for perfect fidelity font synthesis.".into();
+                        } else {
+                            self.status = action.to_string();
                         }
                     }
                 } else if resolved_choice.as_deref() == Some("report") {
@@ -1674,14 +1673,6 @@ impl AppModals for MyApp {
                         );
                         ui.end_row();
 
-                        ui.label("Applitools API key:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.edit_applitools_api_key)
-                                .password(true)
-                                .desired_width(220.0),
-                        );
-                        ui.end_row();
-
                         ui.label("OpenRouter Model:");
                         ui.horizontal(|ui| {
                             egui::ComboBox::from_id_salt("or_model_combo")
@@ -1755,7 +1746,6 @@ impl AppModals for MyApp {
                                 ("MISTRAL_API_KEY", self.edit_mistral_api_key.trim(), false),
                                 ("MISTRAL_MODEL", self.edit_mistral_model.trim(), false),
                                 ("MINDEE_API_KEY", self.edit_mindee_api_key.trim(), false),
-                                ("APPLITOOLS_API_KEY", self.edit_applitools_api_key.trim(), false),
                             ];
                             let content: String = new_config.iter()
                                 .map(|(k, v, _)| format!("{}={}", k, v))
@@ -1799,7 +1789,6 @@ impl AppModals for MyApp {
                                             "MISTRAL_API_KEY" => self.edit_mistral_api_key = val,
                                             "MISTRAL_MODEL" => self.edit_mistral_model = val,
                                             "MINDEE_API_KEY" => self.edit_mindee_api_key = val,
-                                            "APPLITOOLS_API_KEY" => self.edit_applitools_api_key = val,
                                             _ => {}
                                         }
                                 }

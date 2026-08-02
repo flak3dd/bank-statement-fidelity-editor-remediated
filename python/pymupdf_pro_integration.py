@@ -3011,20 +3011,16 @@ def find_text_block_at_click(pdf_path: str, page_num: int, click_x: float, click
 
 
 def _font_substitution_disabled(missing_chars=None):
-    """Return the stable non-mutating disposition for legacy font APIs."""
+    """Stable compatibility response for all disabled font-generation APIs."""
     return {
         "success": False,
         "error": "FONT_SUBSTITUTION_DISABLED",
-        "reason": (
-            "Automatic glyph synthesis, generic-font adaptation, donor-subset "
-            "extension, and AI-selected typeface substitution are not "
-            "fidelity-preserving operations."
+        "message": (
+            "Automatic font synthesis, adaptation, donor substitution, and deep "
+            "replication are disabled for fidelity workflows. Provide a reviewed "
+            "coverage-complete font or revise the replacement text."
         ),
-        "font_path": None,
         "extended_font_path": None,
-        "synthesised": [],
-        "donor_extended": [],
-        "ai_extended": [],
         "still_missing": list(missing_chars or []),
         "tiers_used": [],
     }
@@ -3035,8 +3031,8 @@ def complete_font_with_adaption_fallback(
     font_name: str,
     sample_text: str = "The quick brown fox",
 ):
-    """Legacy compatibility endpoint; automatic typeface adaptation is disabled."""
-    del pdf_path, font_name, sample_text
+    """Compatibility entry point; never creates or substitutes a font."""
+    _ = (pdf_path, font_name, sample_text)
     return _font_substitution_disabled()
 
 
@@ -3045,14 +3041,14 @@ def adapt_font_fallback(
     font_name: str,
     sample_text: str = "The quick brown fox",
 ):
-    """Legacy compatibility endpoint; generic-font substitution is disabled."""
-    del pdf_path, font_name, sample_text
+    """Compatibility entry point; never adapts to a generic typeface."""
+    _ = (pdf_path, font_name, sample_text)
     return _font_substitution_disabled()
 
 
 def deep_font_replication_api(pdf_path, font_name, output_dir):
-    """Legacy compatibility endpoint; automatic glyph generation is disabled."""
-    del pdf_path, font_name, output_dir
+    """Compatibility entry point; never invokes synthesis or donor selection."""
+    _ = (pdf_path, font_name, output_dir)
     return _font_substitution_disabled()
 
 
@@ -3062,10 +3058,10 @@ def replicate_font_for_missing_chars(
     missing_chars_csv: str,
     output_dir: str,
 ):
-    """Legacy compatibility endpoint; donor and composite substitution are disabled."""
-    del pdf_path, font_name, output_dir
-    chars = [character for character in missing_chars_csv.split(",") if character]
-    return _font_substitution_disabled(chars)
+    """Return the exact missing-glyph set without creating a font artifact."""
+    _ = (pdf_path, font_name, output_dir)
+    missing_chars = [character for character in missing_chars_csv.split(",") if character]
+    return _font_substitution_disabled(missing_chars)
 
 
 def dry_run_edit_preview(
@@ -3249,36 +3245,8 @@ if __name__ == "__main__":
         print(json.dumps(result))
 
     elif command == "deep_font_replication":
-        import font_replicator
-        pdf_path = sys.argv[2]
-        font_name = sys.argv[3]
-        output_dir = sys.argv[4]
-
-        # Phase 1
-        res = font_replicator.extract_and_harvest(pdf_path, font_name, output_dir)
-        if not res["success"]:
-            print(json.dumps(res))
-            sys.exit(0)
-
-        metrics = res["metrics"]
-
-        # Phase 2
-        # For now, we replicate some common missing letters as a test
-        glyphs_to_replicate = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        norm_res = font_replicator.normalize_glyphs(metrics["font_path"], metrics, output_dir, glyphs_to_replicate)
-
-        if not norm_res["success"]:
-            print(json.dumps(norm_res))
-            sys.exit(0)
-
-        # Combine results
-        combined = {
-            "success": True,
-            "metrics": metrics,
-            "images": norm_res["images"],
-            "baseline_y": norm_res["baseline_y"]
-        }
-        print(json.dumps(combined))
+        print(json.dumps(_font_substitution_disabled()))
+        sys.exit(2)
 
 
 # ===========================================================================

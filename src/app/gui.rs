@@ -368,7 +368,6 @@ pub struct MyApp {
     pub edit_mistral_model: String,
     pub edit_lipi_api_key: String,
     pub edit_mindee_api_key: String,
-    pub edit_applitools_api_key: String,
     /// Gemini auth mode buffer: false = API key (default), true = Vertex AI
     /// (service-account / ADC). Persisted as `GEMINI_AUTH_MODE`.
     pub edit_gemini_use_vertex: bool,
@@ -566,7 +565,6 @@ impl MyApp {
             edit_mistral_model: config.mistral_model.clone(),
             edit_lipi_api_key: config.lipi_api_key.clone().unwrap_or_default(),
             edit_mindee_api_key: config.mindee_api_key.clone().unwrap_or_default(),
-            edit_applitools_api_key: config.applitools_api_key.clone().unwrap_or_default(),
             edit_gemini_use_vertex: matches!(
                 config.gemini_auth_mode,
                 crate::app::config::GeminiAuthMode::Vertex
@@ -659,7 +657,6 @@ impl MyApp {
         self.edit_mistral_api_key = config.mistral_api_key.clone().unwrap_or_default();
         self.edit_mistral_model = config.mistral_model.clone();
         self.edit_mindee_api_key = config.mindee_api_key.clone().unwrap_or_default();
-        self.edit_applitools_api_key = config.applitools_api_key.clone().unwrap_or_default();
         self.edit_engine_mode = config.engine_mode;
         self.settings.ai_provider = config.ai_provider;
         self.settings.interactive_fallbacks = config.interactive_fallbacks;
@@ -720,10 +717,6 @@ impl MyApp {
             (
                 "MINDEE_API_KEY",
                 self.edit_mindee_api_key.trim().to_string(),
-            ),
-            (
-                "APPLITOOLS_API_KEY",
-                self.edit_applitools_api_key.trim().to_string(),
             ),
             (
                 "GEMINI_AUTH_MODE",

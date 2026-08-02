@@ -6,13 +6,13 @@ A high-fidelity PDF text editor focused on bank statements: replace text and num
 
 - **Targeted edits.** Click any text on a rendered page to select the exact bounding box; type a new value; the engine performs a redaction-based replacement that re-uses the original glyph metrics.
 - **Multi-stage workflow.** Parse → Edit → Balance Preview → Confirm & Render → Visual Validate → Final Math Check, with autosaved drafts so you can pause and resume mid-edit. See [Workflow](#workflow) below.
-- **Multi-backend pipeline with auto-fallback.** Every stage has a configurable primary backend and automatic fallback. If an API key is missing or a cloud service fails, the pipeline gracefully degrades to the next-best offline option. See [Backend Preferences](#backend-preferences).
-- **Boot-time API detection.** On startup the app probes every configured API key and displays availability status (✅ / ⛔) in the Backend Preferences panel. Unavailable backends are labelled with an explanation and signup URL.
+- **Explicit backend routing.** Extraction uses only the selected cloud parser and then the qualified offline parser; unrelated cloud services are never attempted implicitly. Optional verification providers are reported separately and cannot override mandatory local gates. See [Backend Preferences](#backend-preferences).
+- **Capability detection.** The app reports configured and unavailable backends in Backend Preferences without making unrelated startup network calls. Explicit credential checks remain available on demand.
 - **Batch Processing Dashboard.** Drag and drop a folder of PDFs to queue up asynchronous extraction or smart auto-balancing across dozens of statements at once.
 - **Progressive Disclosure.** Complex verification settings and forensic modes are tucked behind an "Advanced Mode" toggle, keeping the default UI clean and focused.
 - **Smart Balance Engine.** Parses the full PDF, detects mathematical imbalance, and asks Gemini for the minimum cascading adjustment plan. Only the *last* running balance is auto-corrected by default; everything else stays untouched. Falls back to local deterministic balance analysis when AI is unavailable.
-- **Hybrid extraction.** Multiple parsers (Mindee, LlamaParse, Document AI, PyMuPDF, Local OCR) plus geometry providers (per-bank YAML templates, PyMuPDF heuristics). Sources are merged with deterministic tiebreak rules.
-- **Multi-layer verification.** Renders original vs. edited at 300 DPI, computes per-pixel delta + perceptual hash + SSIM; optionally adds pdfRest cloud rendering and Applitools Eyes visual AI. Configurable thresholds and retry counts via sliders.
+- **Qualified extraction.** The selected LlamaParse or Document AI provider may fall back only to the local geometry-aware parser. Local OCR remains a deferred, non-selectable v1 PDF backend.
+- **Evidence-gated verification.** Verifies every page at 300 DPI with immutable calibrated thresholds, structural/page-box/font/metadata checks, exact old/new text membership, live-text editability, strict ledger equivalence, and hashed replay evidence. pdfRest and Vision AI are optional additive providers with explicit pass/fail/unavailable outcomes.
 - **Audit log + change history.** Every edit lands in an append-only log file with a snapshot PDF, plus an in-memory undo/redo stack and an autosaved `audit/history.json` so you can resume after a crash. The final step automatically merges the Audit JSON Report as a new page onto the final output PDF.
 - **CLI + GUI parity.** Both interfaces drive the same `Runtime` job loop, so anything you can do in the GUI you can script.
 
@@ -20,18 +20,17 @@ A high-fidelity PDF text editor focused on bank statements: replace text and num
 
 - It cannot forge Adobe signatures, mimic a commercial MuPDF watermark, or defeat sophisticated forensic detection. Re-saved PDFs may still be flagged as "modified" by tools that read library fingerprints.
 - Without any API keys at all, only manual edit / verify / render with local offline parsing works. The more keys you configure, the more pipeline stages light up.
-- pdfRest, Applitools, and AI vision are additive verification layers — they enhance fidelity checking but are not required.
+- pdfRest and Vision AI are optional additive verification layers. Applitools is deferred because no production bridge existed; it is not configurable or advertised as supported.
 
 ## System dependencies
 
 | OS | Required |
 |---|---|
-| **Windows** | Visual Studio 2019 Build Tools (v142). Python 3.10+. Node.js 18+ (for Applitools). |
-| **macOS** | `brew install mupdf tesseract leptonica`. Python 3.10+. Node.js 18+. |
-| **Linux (Ubuntu)** | `apt-get install libmupdf-dev tesseract-ocr libleptonica-dev`. Python 3.10+. Node.js 18+. |
+| **Windows** | Visual Studio 2019 Build Tools (v142). Python 3.10+. |
+| **macOS** | `brew install mupdf tesseract leptonica`. Python 3.10+. |
+| **Linux (Ubuntu)** | `apt-get install libmupdf-dev tesseract-ocr libleptonica-dev`. Python 3.10+. |
 
-Python packages: `pip install pymupdf pymupdfpro fonttools pillow`.  
-Node packages (optional): `npm install @applitools/eyes-images` (for visual AI verification).
+Python packages: `pip install pymupdf pymupdfpro fonttools pillow`.
 
 ## Build
 
@@ -71,7 +70,6 @@ All configuration is via environment variables (or a `.env` file). Copy `.env.ex
 |---|---|---|
 | `PYMUPDF_PRO_KEY` | PyMuPDF Pro (enhanced font handling) | → PyMuPDF free tier |
 | `PDFREST_API_KEY` | Adobe-tier cloud rendering for verification | → local Pdfium |
-| `APPLITOOLS_API_KEY` | Applitools Eyes visual AI testing | → graceful skip (SSIM-only) |
 
 ### Optional / Telemetry
 
@@ -100,7 +98,7 @@ The **Backend Preferences** panel (Settings → Backend Preferences) lets you ch
 | Dual Concurrent | Both engines in parallel | Python + pymupdf |
 | Force Native (Pdfium) | Pdfium only | Always available |
 | Force PyMuPDF | PyMuPDF only | Python + pymupdf |
-| Reconstruct (Typst) | Rebuild from scratch via Typst | Always available |
+| Typst reconstruction | Legacy persisted value only; rejected in fidelity workflows | Not selectable |
 
 ### AI Provider
 | Mode | Description | Requires |
@@ -114,24 +112,20 @@ The **Backend Preferences** panel (Settings → Backend Preferences) lets you ch
 ### Document Parser
 | Mode | Description | Requires | Fallback |
 |---|---|---|---|
-| Mindee | Cloud ML parsing | `MINDEE_API_KEY` | → offline parser |
-| **LlamaParse** (default) | LLM-based parsing | `LLAMAPARSE_API_KEY` | → offline parser |
-| PyMuPDF Built-in ✅ | Local text extraction | Always available | — |
-| Local OCR ✅ | Pure Rust OCR | `--features ocr` | — |
-| Document AI | Google ML parsing | GCP credentials | → offline parser |
+| **LlamaParse** (default) | LLM-based parsing | `LLAMAPARSE_API_KEY` | → qualified offline parser |
+| Offline Heuristic | Local geometry-aware extraction | Always available | — |
+| Local OCR | Deferred for the v1 PDF workflow | Not selectable | — |
+| Document AI | Google ML parsing | GCP credentials | → qualified offline parser |
 
 ### Verification Renderer
 | Mode | Description | Requires | Fallback |
 |---|---|---|---|
 | **Local Pdfium** ✅ (default) | Local rendering | Always available | — |
 | pdfRest (Cloud) | Adobe-tier rendering | `PDFREST_API_KEY` | → Local Pdfium |
-| Applitools Eyes (Additive) | Visual AI testing | `APPLITOOLS_API_KEY` | → Skips if missing |
 
-### Visual Validation Thresholds
-| Setting | Default | Range | Description |
-|---|---|---|---|
-| Visual Diff Threshold | 0.02 | 0.005–0.10 | Tile-max diff ceiling. Lower = stricter. |
-| Max Visual Retries | 5 | 1–10 | Retry attempts with progressive mask widening. |
+### Calibrated Verification Policy
+
+Mandatory verification uses the immutable policy recorded in `assets/verification-calibration-v2.json`. The current outside-region tile ceiling is `0.02`, the intended-region residual ceiling is `0.04`, the SSIM structural floor is `0.85`, every page is checked, and deterministic verification runs once without widening masks or retrying unchanged output under looser criteria.
 
 ## CLI
 
@@ -179,9 +173,9 @@ moves to the next step.
 1. **① Parse + AI validate.** The selected document parser extracts every transaction; if an AI provider is configured, Gemini double-checks for missed rows. If the cloud parser fails, the pipeline auto-falls back to the offline parser. Result: a `ParseValidation` with a completeness score (0..1) and a list of any rows the deterministic geometry extractor saw but the parser missed.
 2. **Edit.** The inline edit table (powered by `egui_extras::TableBuilder`) shows every parsed row with editable Date / Description / Debit / Credit / Balance columns. Numeric fields turn red when the typed text isn't parseable. Click "↶" on any row to revert every queued edit on that row at once.
 3. **② Balance Out Preview.** Recomputes every running balance with the user's edits applied and shows the per-row diff plus the final imbalance. Translucent yellow boxes appear on the canvas over each `will_change` cell — hover for a `<old> → <new>` tooltip.
-4. **③ Confirm and Render.** Applies edits to the PDF using the selected engine mode. If the primary engine fails, the pipeline falls back through Pdfium → Typst Reconstruct as ultimate fail-safe. Drops any "redundant" edits whose typed value already matches what the cascade would produce.
-5. **Visual validate.** Renders the edited PDF, compares to the original page-by-page (only changed pages), retries up to `max_visual_attempts` with growing tolerance. If pdfRest is configured, adds a cloud rendering layer. If Applitools is configured, adds AI visual comparison. Both gracefully degrade if unavailable.
-6. **Final math check.** Re-parses the rendered PDF and verifies all running balances are still consistent.
+4. **③ Confirm and Render.** Applies edits through the selected exact in-place engine. Every target requires stable old-text identity, unique geometry membership, exact requested/matched/placed counts, and staged atomic publication. Lossy Typst reconstruction and automatic font substitution are disabled.
+5. **Independent verification.** Re-parses the staged output locally, checks every page under immutable thresholds, verifies structural and live-text membership invariants, and persists hashed machine evidence. Optional pdfRest, Vision AI, and Document AI outcomes are additive and explicitly recorded as passed, failed, or unavailable.
+6. **Finalization.** Publishes only an output whose locally reparsed row count, sequence, signs, values, running balances, closing balance, content membership, editability, geometry, and visual gates all pass.
 
 ### Batch Processing Flow
 The **Batch Processing** tab allows for bulk operations across multiple PDFs:
@@ -206,8 +200,8 @@ engine/       Balance math, transaction model, verification (multi-layer), histo
               typst reconstruction, font analysis/replication/shaping, offline parser
 pdf/          Engine trait + selector (PyMuPDF primary, Pdfium fallback, OxidizePdf)
 extractors/   Geometry providers (per-bank templates, PyMuPDF heuristic) + hybrid merger
-ai/           Document AI, Gemini, Mindee, LlamaParse, pdfRest, Applitools bridge,
-              PyO3 Python bridge
+ai/           Document AI, Gemini, LlamaParse, pdfRest, Vision AI,
+              supervised Python bridge
 security/     Software root-of-trust, ChaCha20-Poly1305 encryption
 ```
 
@@ -218,12 +212,11 @@ All long-running work goes through the `Runtime` job loop. The GUI never blocks.
 Every pipeline stage is designed with explicit fallback chains:
 
 ```
-PDF Engine:    PyMuPDF → Pdfium → Typst Reconstruct (ultimate)
-Parsers:       Mindee/LlamaParse/DocAI → offline_parser (PyMuPDF built-in)
-AI Balance:    Gemini → local balance::process_and_reconcile()
-Verification:  pdfRest Cloud → Local Pdfium (always available)
-Visual Check:  Applitools + SSIM + Tile-max + Perceptual Hash (additive layers)
-AI Vision:     Gemini Vision → graceful skip (pass on local metrics only)
+PDF editing:   selected exact engine; unsupported or ambiguous targets fail before publication
+Parsers:       selected LlamaParse/Document AI → qualified offline parser only
+Balance:       deterministic exact-decimal engine; configured AI is advisory
+Verification:  mandatory local full-document gates + optional pdfRest/Vision/Document AI evidence
+Provider error: explicit unavailable/failed gate; never converted into a local pass
 ```
 
 ### Processing boundary
@@ -232,4 +225,4 @@ Version 1 processes documents through the local application runtime. It does not
 
 ## Forensics & watermarking caveats
 
-This tool edits text perfectly but cannot achieve commercial-tool forensic identity. Public watermarking limits apply. See [the original disclaimer](#what-it-does-not-do).
+This tool is designed for evidence-verified in-place edits, but it does not claim universal visual or forensic identity with every commercial PDF producer. See [the original disclaimer](#what-it-does-not-do).

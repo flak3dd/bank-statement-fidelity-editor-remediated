@@ -41,7 +41,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 PDFREST_API_KEY = os.environ.get("PDFREST_API_KEY", "")
-APPLITOOLS_API_KEY = os.environ.get("APPLITOOLS_API_KEY", "")
 PYMUPDF_PRO_KEY = os.environ.get("PYMUPDF_PRO_KEY", "")
 
 
@@ -60,7 +59,6 @@ apis = {
     "Groq": api_available(GROQ_API_KEY),
     "OpenRouter": api_available(OPENROUTER_API_KEY),
     "pdfRest": api_available(PDFREST_API_KEY),
-    "Applitools": api_available(APPLITOOLS_API_KEY),
     "PyMuPDF Pro": api_available(PYMUPDF_PRO_KEY),
 }
 for name, avail in apis.items():
@@ -1350,86 +1348,6 @@ def test4_pdfrest(pdf_path, gt):
         }
 
 
-def test4_applitools(pdf_path, gt):
-    """Applitools Eyes visual AI."""
-    start = time.time()
-    if not api_available(APPLITOOLS_API_KEY):
-        return {
-            "tool": "Applitools Eyes",
-            "correctness": 0,
-            "fidelity": 0,
-            "avg": 0,
-            "details": "API key not configured",
-            "elapsed_ms": 0,
-        }
-
-    try:
-        # Render pages as images for Applitools
-        doc = pymupdf.open(pdf_path)
-        img1_path = os.path.join(RESULTS_DIR, "test4_applitools_page1.png")
-        img2_path = os.path.join(RESULTS_DIR, "test4_applitools_page2.png")
-
-        doc[0].get_pixmap(dpi=300).save(img1_path)
-        doc[1].get_pixmap(dpi=300).save(img2_path)
-        doc.close()
-
-        # Call Applitools via Node.js bridge
-        bridge_script = os.path.join("src", "ai", "applitools_bridge.js")
-        if not os.path.exists(bridge_script):
-            return {
-                "tool": "Applitools Eyes",
-                "correctness": 0,
-                "fidelity": 0,
-                "avg": 0,
-                "details": "Bridge script not found",
-                "elapsed_ms": int((time.time() - start) * 1000),
-            }
-
-        env = os.environ.copy()
-        env["APPLITOOLS_API_KEY"] = APPLITOOLS_API_KEY
-
-        result = subprocess.run(
-            ["node", bridge_script, img1_path, img2_path],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-        )
-
-        output = result.stdout + result.stderr
-
-        # Parse APPLITOOLS_RESULT from output
-        match = re.search(r"APPLITOOLS_RESULT:({.*})", output)
-        if match:
-            ai_result = json.loads(match.group(1))
-            passed = ai_result.get("passed", False)
-            diff_detected = not passed
-            correctness = 90 if diff_detected else 30
-        else:
-            correctness = 40  # Ran but couldn't parse result
-
-        fidelity = 100  # Read-only comparison
-        elapsed = time.time() - start
-
-        return {
-            "tool": "Applitools Eyes",
-            "correctness": correctness,
-            "fidelity": fidelity,
-            "avg": (correctness + fidelity) / 2,
-            "details": f"Visual AI diff={'DETECTED' if correctness > 50 else 'MISSED'}, output_len={len(output)}",
-            "elapsed_ms": int(elapsed * 1000),
-        }
-    except Exception as e:
-        return {
-            "tool": "Applitools Eyes",
-            "correctness": 0,
-            "fidelity": 0,
-            "avg": 0,
-            "details": f"CRASH: {e}",
-            "elapsed_ms": int((time.time() - start) * 1000),
-        }
-
-
 def test4_gemini_vision(pdf_path, gt):
     """Gemini Vision AI artifact detection."""
     start = time.time()
@@ -1926,7 +1844,6 @@ def run_all_tests():
         "Test 4: Visual QA": [
             (test4_ssim_base, pdf4, gt4),
             (test4_pdfrest, pdf4, gt4),
-            (test4_applitools, pdf4, gt4),
             (test4_gemini_vision, pdf4, gt4),
         ],
         "Test 5: Transfer Transactions": [

@@ -5,8 +5,7 @@ This document provides a detailed overview of the specific technologies, framewo
 ## Core Languages
 
 - **Rust (Edition 2021):** The primary language for the application logic, GUI, and high-performance asynchronous orchestration. Rust guarantees memory safety, fast execution, and strict concurrency control.
-- **Python (3.10+):** Used selectively for deep integrations with proprietary or C-based PDF rendering and manipulation libraries (like PyMuPDF Pro) that don't have native Rust equivalents. Runs inside a dedicated PyO3 actor thread.
-- **Node.js (18+):** Used for the Applitools Eyes visual AI bridge (`src/ai/applitools_bridge.js`). Invoked as a child process from Rust for visual diff testing.
+- **Python (3.10+):** Used selectively for PyMuPDF/PyMuPDF Pro integrations that do not have native Rust equivalents. It runs as a supervised JSON-lines worker process with a strict protocol, bounded lifecycle, and isolated protocol output.
 
 ## GUI Framework (Native Desktop)
 
@@ -21,7 +20,7 @@ The application employs a multi-engine strategy with automatic fallback, managed
 - **`PyMuPDF` / `pymupdfpro` (via `pyo3`):** The primary engine. Called from Rust via Python bindings. Capable of high-fidelity, per-segment redaction and text insertion while accurately reusing the exact embedded font dictionaries and glyph metrics. The Pro tier adds enhanced font handling (gated by `PYMUPDF_PRO_KEY`).
 - **`pdfium-render` (0.8.x):** Rust bindings to Google's open-source `pdfium` C++ library (the same engine used in Google Chrome). Used as the fallback engine for rendering, text extraction, and editing when PyMuPDF is unavailable.
 - **`lopdf` (0.34):** A pure-Rust library for low-level PDF dictionary manipulation. Used for the Split & Merge engine, extracting pages and merging them back together without altering visual fidelity or dropping fonts.
-- **Typst Engine (`subsetter` + `typst`):** Ultimate fail-safe reconstruction engine. When both PyMuPDF and Pdfium fail to apply edits, this engine rebuilds the PDF from scratch using Typst typesetting with font subsetting. Always available as the last resort.
+- **Legacy Typst reconstruction:** Persisted configuration values remain readable for compatibility, but lossy reconstruction is not selectable and is rejected in fidelity workflows.
 
 ### Engine Mode Hierarchy
 
@@ -31,19 +30,17 @@ PdfEngineSelector:
   DualConcurrent  → Both engines in parallel, prefer PyMuPDF
   NativeOnly      → Pdfium only
   PyMuPdfOnly     → PyMuPDF only
-  TypstReconstruct → Full document rebuild from transaction data
+  TypstReconstruct → legacy value; explicit unsupported disposition
 ```
 
 ## Document Parsers (Multi-Backend)
 
-Each parser auto-falls back to the offline parser if its API key is missing or the call fails:
+Parser routing is explicit: only the selected cloud parser may run, followed by the qualified offline parser. Unrelated providers are never inserted into the fallback chain.
 
-- **Mindee Financial Document API:** Cloud-based ML parser with per-field bounding boxes. Requires `MINDEE_API_KEY`. Best balance of accuracy, ease of setup, and cost.
-- **Google Cloud Document AI (v1beta3):** Highest accuracy on trained layouts. Supports custom-trained processor versions with in-app admin (train, deploy, undeploy). Requires GCP credentials.
-- **LlamaParse (default):** LLM-based document parser via LlamaCloud. Requires `LLAMAPARSE_API_KEY`.
-- **PyMuPDF Built-in:** Local text extraction using pymupdf's native layout parser. No external dependencies. Always available.
-- **Local OCR (`ocrs` + `rten`):** Pure Rust OCR for scanned documents. Requires `--features ocr` at compile time.
-- **Offline Parser (`offline_parser.rs`):** Deterministic heuristic parser using regex patterns and structural analysis. The universal fallback for all cloud parsers.
+- **Google Cloud Document AI:** Optional selected parser with trained-layout support and explicit provider evidence.
+- **LlamaParse (default cloud choice):** Optional selected LLM-based parser via LlamaCloud.
+- **Offline Parser (`offline_parser.rs`):** Deterministic local text-layer and geometry parser with stable row identity, exact-decimal continuity checks, and review flags.
+- **Local OCR (`ocrs` + `rten`):** Legacy/deferred PDF mode. Configuration values remain readable, but the mode is not selectable in v1.
 
 ## AI and Machine Learning Integration
 
@@ -52,22 +49,21 @@ Each parser auto-falls back to the offline parser if its API key is missing or t
   - Completeness Validation — checks for missed transaction rows.
   - Vision Validation — compares rendered PDF pages for visual fidelity.
   - Auth modes: API Key (simple) or Vertex AI (enterprise, SA/ADC).
-  - Fallback: graceful skip with score=0.7 (pipeline continues without AI).
-- **Applitools Eyes (via Node.js bridge):** Visual AI testing layer. Compares original vs. edited rendered pages using Applitools' proprietary visual AI. Requires `APPLITOOLS_API_KEY` + Node.js. Additive layer — gracefully skips if unavailable.
-- **pdfRest API:** Adobe-tier cloud PDF rendering for high-fidelity visual verification. Requires `PDFREST_API_KEY`. Falls back to local Pdfium rendering.
+  - Provider pass, rejection, malformed response, and unavailability are represented explicitly; optional AI never overrides mandatory local gates.
+- **pdfRest API:** Optional additive cloud rendering. Requests are bounded and contract-tested; authorization is scoped to the API upload, downloaded evidence must be PNG, and provider failure cannot weaken local acceptance.
 
 ## Verification Pipeline (Multi-Layer)
 
-The verification system uses additive layers — each layer runs independently:
+The verification system separates mandatory local gates from optional provider evidence:
 
-1. **SSIM (Structural Similarity Index):** Compares rendered page images pixel-by-pixel.
-2. **Tile-Max Diff:** Divides pages into tiles and finds the maximum local difference (catches localized drift that whole-page averages hide).
-3. **Perceptual Hash (`image_hasher`):** Hash-based similarity check for structural integrity.
-4. **pdfRest Cloud Rendering (optional):** Adobe-tier rendering for comparison against local renders.
-5. **Applitools Eyes (optional):** AI visual comparison via Node.js bridge.
-6. **Gemini Vision AI (optional):** AI-based visual fidelity analysis.
+1. **Structural gates:** Page count/order, MediaBox, CropBox, rotation, content presence, font resources, and metadata policy.
+2. **Exact content/editability gates:** Old text must exist exactly once at the source target, new live text exactly once at the edited target, and stale or duplicate membership fails.
+3. **Visual gates:** Every page is rendered at 300 DPI; tile-max, outside-region SSIM, and intended-region residuals use immutable thresholds.
+4. **Financial gates:** The independently reparsed ledger must preserve row count, sequence, dates, descriptions, signs, values, every running balance, and closing balance.
+5. **Evidence gate:** JSON report, replay configuration, input hashes, rendered-artifact hashes, and typed dispositions are atomically persisted and read back.
+6. **Optional providers:** pdfRest, Vision AI, and Document AI outcomes remain additive `passed`, `failed`, or `unavailable` evidence.
 
-Configurable thresholds: `visual_diff_threshold` (default 0.02) and `max_visual_attempts` (default 5).
+The immutable policy is versioned in `assets/verification-calibration-v2.json`; deterministic verification never widens masks or retries unchanged output under looser criteria.
 
 ## Geometry Extraction (Hybrid)
 
@@ -84,32 +80,27 @@ Configurable thresholds: `visual_diff_threshold` (default 0.02) and `max_visual_
 
 ## Python Interoperability (FFI)
 
-- **`pyo3` (0.29):** The Rust/Python bridge. Embeds a Python interpreter directly inside the Rust process, allowing Rust to execute Python scripts with near-zero overhead. Work is constrained to a single dedicated actor thread to avoid Python GIL deadlocks. Panics inside the actor are caught and surfaced as structured errors.
-
-## Node.js Interoperability
-
-- **Child Process:** The Applitools bridge (`src/ai/applitools_bridge.js`) is invoked as a `node` child process from Rust. Communication is via stdout JSON lines (`APPLITOOLS_RESULT:{...}`). Failure detection is graceful — if Node.js or the bridge script is unavailable, the verification pipeline continues with local-only metrics.
+- **Supervised Python worker:** Rust launches a pinned Python runtime through a strict JSON-lines protocol. Native/third-party stdout is quarantined from the protocol stream, request/response schemas reject unknown fields, lifecycle results are exactly-once, and worker termination is bounded.
 
 ## Observability and Logging
 
 - **`tracing` / `tracing-subscriber`:** Structured, event-driven logging framework for Rust with daily file rotation.
 - **`opentelemetry` (0.27):** OpenTelemetry SDK for distributed tracing, allowing the application to export metrics and traces to an OTLP-compatible endpoint for deep debugging.
-- **Boot-Time API Summary:** `ApiAvailability::log_summary()` logs the availability status of all backends on startup for instant diagnostics.
+- **Capability Summary:** Local configuration is reported without unrelated startup network calls; explicit credential checks can be run on demand.
 
 ## Serialization and State Management
 
 - **`serde` (1.0) / `serde_json`:** Used ubiquitously for serializing and deserializing API requests, JSON outputs, and internal message passing.
-- **`confy` (0.6):** Configuration management for persisting `AppSettings` (dark mode, advanced mode, backend preferences, visual thresholds) to the user's local application data directory.
+- **`confy` (0.6):** Configuration management for user preferences and backend choices. Verification thresholds shown in the UI are read-only policy values, not user-tunable acceptance criteria.
 - **`dotenvy`:** Loads `.env` file on startup. Hot-reloadable via `Job::ReloadConfig`.
 
 ## Security and Fault Tolerance
 
 - **`chacha20poly1305`:** Strong encryption of the local Document AI cache and other sensitive artifacts at rest.
 - **Enterprise Fault Tolerance:** Exponential backoffs, automatic retry middleware via `reqwest-retry`, strict cryptographic software root-of-trust (via SHA-256 and `.pipeline_key`).
-- **Zero-Trust API Detection:** Every API key is validated at boot time. Missing keys auto-exclude their backend from the fallback chain and disable the corresponding UI toggle with an explanatory message.
+- **Explicit provider availability:** Missing, malformed, rejected, and timed-out provider outcomes remain typed and visible; provider availability never changes mandatory local verification criteria.
 
 ## Font Engineering
 
 - **`ttf-parser`:** Fast, zero-allocation TrueType/OpenType font parsing for font analysis and metric extraction.
-- **`subsetter`:** Font subsetting for Typst reconstruction — embeds only the glyphs needed by each page.
-- **Font Replication:** Deep font analysis extracts embedded font programs and re-embeds them with matched weight/width metrics for cross-statement font transfer.
+- **Font coverage analysis:** Embedded and supplied fonts are inspected for required glyph coverage. Unsupported automatic synthesis, donor substitution, and metric adaptation are quarantined and fail before publication.

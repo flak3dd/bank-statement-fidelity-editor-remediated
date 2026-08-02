@@ -295,7 +295,6 @@ pub struct AppConfig {
     pub openrouter_api_key: Option<String>,
     pub mistral_api_key: Option<String>,
     pub mindee_api_key: Option<String>,
-    pub applitools_api_key: Option<String>,
     pub vision_api_key: Option<String>,
     pub openrouter_model: String,
     pub mistral_model: String,
@@ -345,9 +344,6 @@ impl Drop for AppConfig {
         if let Some(key) = &mut self.mindee_api_key {
             key.zeroize();
         }
-        if let Some(key) = &mut self.applitools_api_key {
-            key.zeroize();
-        }
         if let Some(key) = &mut self.vision_api_key {
             key.zeroize();
         }
@@ -377,7 +373,6 @@ impl Default for AppConfig {
             openrouter_api_key: None,
             mistral_api_key: None,
             mindee_api_key: None,
-            applitools_api_key: None,
             vision_api_key: None,
             openrouter_model: "mistralai/mistral-nemo:free".to_string(),
             mistral_model: "mistral-large-latest".to_string(),
@@ -484,7 +479,6 @@ impl AppConfig {
         let pdfrest_api_key = clean_key(env::var("PDFREST_API_KEY"));
         let lipi_api_key = clean_key(env::var("LIPI_API_KEY"));
         let mindee_api_key = clean_key(env::var("MINDEE_API_KEY"));
-        let applitools_api_key = clean_key(env::var("APPLITOOLS_API_KEY"));
         let vision_api_key = clean_key(env::var("VISION_API_KEY"));
 
         let llamaparse_api_key = clean_key(env::var("LLAMAPARSE_API_KEY"));
@@ -589,7 +583,6 @@ impl AppConfig {
             openrouter_api_key,
             mistral_api_key,
             mindee_api_key,
-            applitools_api_key,
             vision_api_key,
             openrouter_model,
             mistral_model,

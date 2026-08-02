@@ -13,18 +13,17 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maryjpww-star/bank-statement-fidelity-editor.git"
+    "url": "git+https://github.com/flak3dd/bank-statement-fidelity-editor-remediated.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/maryjpww-star/bank-statement-fidelity-editor/issues"
+    "url": "https://github.com/flak3dd/bank-statement-fidelity-editor-remediated/issues"
   },
-  "homepage": "https://github.com/maryjpww-star/bank-statement-fidelity-editor#readme",
+  "homepage": "https://github.com/flak3dd/bank-statement-fidelity-editor-remediated#readme",
   "dependencies": {
-    "@applitools/eyes-images": "^4.31.49",
     "agy": "^0.0.0"
   }
 }

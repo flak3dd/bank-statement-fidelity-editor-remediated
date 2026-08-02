@@ -74,9 +74,15 @@ impl AppError {
         match self {
             Self::ApiConfigMissing(_) => Some("Open Settings to configure API Keys"),
             Self::ApiFailure(_) => Some("Retry with a different AI Provider (e.g. Gemini, OpenRouter) or wait for quota reset"),
-            Self::FontMissing(_) => Some("Synthesize Font via Typst Reconstruction (Slower but 100% Fidelity)"),
-            Self::VisualDrift(_) => Some("Proceed anyway, or Retry with Typst Reconstruction"),
-            Self::ParseFailure(_) => Some("Retry with Offline OCR / LlamaParse fallback"),
+            Self::FontMissing(_) => Some(
+                "Return to edit review and supply a verified font with complete glyph coverage",
+            ),
+            Self::VisualDrift(_) => Some(
+                "Review the verification evidence; adjust the edit or cancel publication",
+            ),
+            Self::ParseFailure(_) => Some(
+                "Review parser selection or retry with the qualified offline parser",
+            ),
             Self::Unknown(_) => Some("Retry the last action or check logs"),
             _ => None,
         }
@@ -126,19 +132,19 @@ mod tests {
         let err3 = AppError::FontMissing("".into());
         assert_eq!(
             err3.suggested_action(),
-            Some("Synthesize Font via Typst Reconstruction (Slower but 100% Fidelity)")
+            Some("Return to edit review and supply a verified font with complete glyph coverage")
         );
 
         let err4 = AppError::VisualDrift("".into());
         assert_eq!(
             err4.suggested_action(),
-            Some("Proceed anyway, or Retry with Typst Reconstruction")
+            Some("Review the verification evidence; adjust the edit or cancel publication")
         );
 
         let err5 = AppError::ParseFailure("".into());
         assert_eq!(
             err5.suggested_action(),
-            Some("Retry with Offline OCR / LlamaParse fallback")
+            Some("Review parser selection or retry with the qualified offline parser")
         );
 
         let err6 = AppError::Unknown("".into());

@@ -1,7 +1,7 @@
-//! Enhanced visual verification module with adaptive thresholds and multi-layer validation.
+//! Legacy compatibility wrapper for immutable local visual verification.
 //!
-//! This module provides improved visual fidelity checking with tighter thresholds,
-//! smaller detection tiles, and adaptive masking for better accuracy.
+//! New workflows use `engine::verification`; this exported API remains for callers
+//! that deserialize its report shape, but it no longer adapts acceptance criteria.
 
 use image::{GrayImage, RgbaImage};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ pub struct EnhancedVerificationReport {
     /// Per-edit region fidelity scores
     pub edit_region_scores: Vec<EditRegionScore>,
 
-    /// Adaptive threshold used for this verification
+    /// Legacy field retained for report compatibility; always the fixed policy threshold.
     pub adaptive_threshold: f64,
 
     /// SSIM score (structural similarity)
@@ -27,7 +27,7 @@ pub struct EnhancedVerificationReport {
     /// Perceptual hash distance
     pub hash_distance: f64,
 
-    /// Whether the visual diff passed with adaptive masking
+    /// Legacy field retained for compatibility; always false because masking is immutable.
     pub passed_with_adaptive_mask: bool,
 }
 
@@ -44,7 +44,7 @@ pub struct EditRegionScore {
     pub kerning_drift_px: f32,
 }
 
-/// Multi-layer visual validation engine with adaptive thresholds.
+/// Compatibility visual validation engine with immutable thresholds.
 pub struct VisualFidelityEngine {
     base_threshold: f64,
     ssim_floor: f64,
@@ -56,9 +56,9 @@ pub struct VisualFidelityEngine {
 impl Default for VisualFidelityEngine {
     fn default() -> Self {
         Self {
-            base_threshold: 0.005, // Much tighter than 0.02
-            ssim_floor: 0.85,      // Much higher than 0.40
-            tile_size: 12,         // Smaller tiles for character-level detection
+            base_threshold: 0.02,
+            ssim_floor: 0.40,
+            tile_size: 24,
             edit_region_dpi: 600.0,
         }
     }
@@ -69,17 +69,19 @@ impl VisualFidelityEngine {
         Self::default()
     }
 
-    pub fn with_threshold(mut self, threshold: f64) -> Self {
-        self.base_threshold = threshold;
+    /// Retained for source compatibility. Caller thresholds are ignored because
+    /// verification policy is immutable and recorded in replay evidence.
+    pub fn with_threshold(self, _threshold: f64) -> Self {
         self
     }
 
-    pub fn with_ssim_floor(mut self, floor: f64) -> Self {
-        self.ssim_floor = floor;
+    /// Retained for source compatibility. Caller floors are ignored because
+    /// verification policy is immutable and recorded in replay evidence.
+    pub fn with_ssim_floor(self, _floor: f64) -> Self {
         self
     }
 
-    /// Run comprehensive visual validation with adaptive thresholding.
+    /// Run visual validation with the immutable compatibility policy.
     pub fn validate_edit(
         &self,
         original_img: &RgbaImage,
@@ -99,15 +101,10 @@ impl VisualFidelityEngine {
         // Compute perceptual hash distance
         let hash_dist = self.compute_hash_distance(original_img, edited_img);
 
-        // Adaptive threshold: tighten if edit regions score well
-        let adaptive_threshold = if ssim > 0.95 {
-            self.base_threshold * 0.5 // Tighter threshold if edits are good
-        } else {
-            self.base_threshold
-        };
+        let fixed_threshold = self.base_threshold;
 
-        // Determine if verification passed
-        let passed = tile_score < adaptive_threshold && ssim >= self.ssim_floor;
+        // Determine if verification passed under immutable policy.
+        let passed = tile_score < fixed_threshold && ssim >= self.ssim_floor;
 
         EnhancedVerificationReport {
             math_valid: true, // TODO: integrate math validation
@@ -115,14 +112,14 @@ impl VisualFidelityEngine {
             only_intended_changes: passed,
             report_files: vec![],
             message: format!(
-                "Visual verification: tile_max={:.4}, SSIM={:.4}, hash_dist={:.4}, adaptive_threshold={:.4}",
-                tile_score, ssim, hash_dist, adaptive_threshold
+                "Visual verification: tile_max={:.4}, SSIM={:.4}, hash_dist={:.4}, fixed_threshold={:.4}",
+                tile_score, ssim, hash_dist, fixed_threshold
             ),
             edit_region_scores: vec![],
-            adaptive_threshold,
+            adaptive_threshold: fixed_threshold,
             ssim_score: ssim,
             hash_distance: hash_dist,
-            passed_with_adaptive_mask: passed,
+            passed_with_adaptive_mask: false,
         }
     }
 
@@ -148,7 +145,7 @@ impl VisualFidelityEngine {
         1.0 - mse
     }
 
-    /// Compute localized tile-max with adaptive tile size.
+    /// Compute localized tile-max with the fixed policy tile size.
     fn compute_tile_max(
         &self,
         orig: &GrayImage,
@@ -256,9 +253,9 @@ mod tests {
     #[test]
     fn test_visual_fidelity_engine_creation() {
         let engine = VisualFidelityEngine::new();
-        assert_eq!(engine.base_threshold, 0.005);
-        assert_eq!(engine.ssim_floor, 0.85);
-        assert_eq!(engine.tile_size, 12);
+        assert_eq!(engine.base_threshold, 0.02);
+        assert_eq!(engine.ssim_floor, 0.40);
+        assert_eq!(engine.tile_size, 24);
     }
 
     #[test]
@@ -267,10 +264,18 @@ mod tests {
         let img = RgbaImage::new(100, 100);
         let report = engine.validate_edit(&img, &img, &[]);
 
-        assert!(
-            report.passed_with_adaptive_mask,
-            "Identical images should pass"
-        );
+        assert!(report.only_intended_changes, "identical images should pass");
+        assert!(!report.passed_with_adaptive_mask);
+        assert_eq!(report.adaptive_threshold, 0.02);
         assert!(report.ssim_score > 0.99, "SSIM should be near 1.0");
+    }
+
+    #[test]
+    fn caller_threshold_overrides_are_ignored() {
+        let engine = VisualFidelityEngine::new()
+            .with_threshold(1.0)
+            .with_ssim_floor(0.0);
+        assert_eq!(engine.base_threshold, 0.02);
+        assert_eq!(engine.ssim_floor, 0.40);
     }
 }

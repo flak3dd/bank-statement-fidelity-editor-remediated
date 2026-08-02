@@ -1305,19 +1305,32 @@ async fn verify_edit_pages_with_intents_and_padding(
         "report and replay evidence are atomically persisted and read back before return",
     ));
 
+    let mandatory_disposition = if gates
+        .iter()
+        .filter(|gate| gate.mandatory)
+        .all(|gate| gate.status == VerificationGateStatus::Passed)
+    {
+        "PASS"
+    } else {
+        "FAIL"
+    };
     let mut final_message = format!(
-        "Verification Result:\nMath: {}\nVisual (tile-max): {:.4} (Threshold: {})\nOnly Intended: {}",
-        if math_valid { "✅" } else { "❌" },
-        max_tile_score,
-        VISUAL_DIFF_THRESHOLD,
-        if only_intended_changes { "✅" } else { "❌" }
+        "Independent verification evidence summary\nMandatory disposition: {mandatory_disposition}\nFinancial evidence: {}\nOutside approved regions: {} (worst tile score {max_tile_score:.4}; maximum {VISUAL_DIFF_THRESHOLD:.4})\nPerceptual structure: {} (minimum SSIM {min_ssim:.4}; floor {SSIM_FAILURE_FLOOR:.4})",
+        if math_valid { "PASS" } else { "FAIL" },
+        if only_intended_changes { "PASS" } else { "FAIL" },
+        if min_ssim >= SSIM_FAILURE_FLOOR { "PASS" } else { "FAIL" },
     );
     final_message.push_str(&format!(
-        "\nEdit-region fidelity (max residual): {max_edit_region_score:.4}"
+        "\nApproved edit regions: {} (maximum residual {max_edit_region_score:.4}; maximum {EDIT_REGION_FAILURE_THRESHOLD:.4})",
+        if intended_bboxes.is_empty() {
+            "NOT APPLICABLE"
+        } else if max_edit_region_score < EDIT_REGION_FAILURE_THRESHOLD {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     ));
-    final_message.push_str(&format!(
-        "\nPerceptual SSIM (min, outside edits): {min_ssim:.4} (Floor: {SSIM_FAILURE_FLOOR})"
-    ));
+    final_message.push_str("\nThe machine report contains every typed gate, artifact hash, input hash, and replay parameter.");
     final_message.push_str(&format!("\n{math_message}"));
 
     let mut report = VerificationReport {
