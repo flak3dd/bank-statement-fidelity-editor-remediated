@@ -1,9 +1,9 @@
 # Remediation Program Status
 
-**Repository head audited:** `913672163fb5eee329a3b2b63e8ae601958fda63`
-**Working branch:** `remediation/phase-06-pdf-exactness`
-**Current phase:** Phase 07 / independent fail-closed verification
-**Current gate:** Gate 06 — `PASS`
+**Repository head audited:** `c354094b83e31ca7e026e7749c567931a97a43f4`
+**Working branch:** public `master` authorized by the repository owner
+**Current phase:** Phase 09 / coherent GUI, batch, recovery, audit UX, and accessibility
+**Current gate:** Gate 08 — `NO-GO` for a bundled local LLM; deterministic core retained
 **Release publication:** Frozen
 
 ## Accepted owner decisions
@@ -12,10 +12,10 @@
 |---|---|---|
 | Python and PyMuPDF remain permanent first-class production components and must be fortified. | Accepted | `adr/ADR-0001-python-first-production-pipeline.md` |
 | Windows x64 and macOS Apple Silicon are mandatory customer platforms. | Accepted | `adr/ADR-0002-windows-macos-production-support.md` |
-| A local LLM may be added only after benchmark, resource, schema, packaging, and deterministic-safety gates pass. | Accepted for evaluation | `adr/ADR-0003-conditional-local-llm.md` |
+| A local LLM may be added only after benchmark, resource, schema, packaging, and deterministic-safety gates pass. | Gate evaluated; **NO-GO for v1** | `adr/ADR-0003-conditional-local-llm.md` and Gate 08 manifest |
 | Functional work precedes non-blocking privacy hardening, but critical data-integrity and active secret/data-exposure defects remain immediate blockers. | Accepted with release safeguards | `adr/ADR-0004-functional-first-privacy-final.md` |
-| Repository access uses a write-enabled repository-scoped deploy key. | Verified | Read and write dry-run against audited head succeeded. |
-| Remote changes use phase/ticket branches; `master` is not modified directly. | Active default | `MASTER_PLAN.md` |
+| Repository access uses the owner-authorized public repository. | Verified | `https://github.com/flak3dd/bank-statement-fidelity-editor-remediated` |
+| Public `master` publication was explicitly authorized for the remediated source and CI workflow. | Active for this repository | Owner confirmation in task record. |
 
 ## Phase ledger
 
@@ -28,9 +28,9 @@
 | 04 | 04 | Complete | Supervised Python 3.12/PyMuPDF protocol, atomic mutation publication, runtime manifest, bundled-runtime discovery, resource bounds, and cross-platform fault regressions passed in CI run `30707260996`. |
 | 05 | 05 | Complete | Canonical ledger, selected-provider routing, exact 30-row offline extraction, fail-closed completeness/math, truthful OCR exclusion, validated dates, provider-free transfer, and bounded batch extraction passed in CI run `30712005667`. |
 | 06 | 06 | Complete | Stable exact targets, CTM/CropBox/rotation geometry, fail-closed fonts, pinned Pdfium, transactional segmentation, and atomic output passed in CI run `30720299347`. |
-| 07 | 07 | In progress | Independent fail-closed verification. |
-| 08 | 08 | Planned | Local LLM go/no-go and conditional integration. |
-| 09 | 09 | Planned | Coherent accessible GUI, batch, audit, and recovery UX. |
+| 07 | 07 | Complete | Full-document structural, visual, exact-content, editability, financial, provider, evidence, calibration, and repeatability gates passed in CI run `30730576656`. |
+| 08 | 08 | Complete — NO-GO | No mandatory or bundled local LLM ships in v1; the capability remains explicitly unavailable and the deterministic core is unchanged. |
+| 09 | 09 | In progress | Coherent accessible GUI, batch, audit, and recovery UX. |
 | 10 | 10 | Planned | Self-contained Windows/macOS packages. |
 | 11 | 11 | Planned | Functional corpus, fault, performance, provider, and package qualification. |
 | 12 | 12 | Planned | Final non-blocking privacy, secrets, dependency, and supply-chain hardening. |
@@ -38,7 +38,7 @@
 
 ## Completed checkpoint
 
-Gate 00 established governance and the release freeze at `5c3678c`; Gate 01 established the executable cross-platform base state; Gate 02 closed the critical integrity failure classes at candidate `500167b`; Gate 03 closed the unified runtime at candidate `c84c631`; Gate 04 closed the permanent supervised Python/PyMuPDF production pipeline at candidate `85e15fc`; Gate 05 closed extraction completeness and financial correctness at candidate `9e5e8a1`; and Gate 06 closed exact PDF mutation, geometry, font, segmentation, Pdfium, fallback, and publication integrity at candidate `9136721` in CI run `30720299347`. All work remains on remediation branches and the default branch is untouched.
+Gate 00 established governance and the release freeze at `5c3678c`; Gate 01 established the executable cross-platform base state; Gate 02 closed the critical integrity failure classes at candidate `500167b`; Gate 03 closed the unified runtime at candidate `c84c631`; Gate 04 closed the permanent supervised Python/PyMuPDF production pipeline at candidate `85e15fc`; Gate 05 closed extraction completeness and financial correctness at candidate `9e5e8a1`; Gate 06 closed exact PDF mutation and atomic publication at candidate `9136721`; Gate 07 closed independent fail-closed verification at candidate `c354094` in CI run `30730576656`; and Gate 08 closed with an explicit no-local-LLM v1 decision. The active public repository is owner-authorized and release publication remains frozen pending later gates.
 
 ## Gate 01 checklist
 
