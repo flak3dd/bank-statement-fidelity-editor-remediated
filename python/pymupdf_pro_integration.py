@@ -49,6 +49,8 @@ import json
 import math
 import gc
 
+_FONT_RESOURCE_PROFILES = None
+
 # PyMuPDF Pro lives in the separate `pymupdfpro` package and exposes the
 # `pymupdf.pro` submodule. Import it defensively: if the Pro package is not
 # installed (or fails to load), we must NOT crash the whole module — doing so
@@ -997,6 +999,175 @@ def _simple_source_resource_plan(page, span: dict, font_xref, new_text: str):
         "font_obj": font_obj,
         "text_width": float(font_obj.text_length(new_text, fontsize=fontsize)),
     }
+
+
+def _load_font_resource_profiles():
+    global _FONT_RESOURCE_PROFILES
+    if _FONT_RESOURCE_PROFILES is not None:
+        return _FONT_RESOURCE_PROFILES
+    profile_path = os.path.join(os.path.dirname(__file__), "font-resource-profiles.json")
+    try:
+        with open(profile_path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        _FONT_RESOURCE_PROFILES = {}
+        return _FONT_RESOURCE_PROFILES
+    profiles = payload.get("profiles") if payload.get("schema_version") == 1 else None
+    _FONT_RESOURCE_PROFILES = profiles if isinstance(profiles, dict) else {}
+    return _FONT_RESOURCE_PROFILES
+
+
+class _ProfiledFontMetrics:
+    def __init__(self, character_to_cid: dict, advance_em: dict):
+        self.character_to_cid = dict(character_to_cid)
+        self.advance_em = dict(advance_em)
+
+    def text_length(self, text: str, fontsize: float = 1.0) -> float:
+        total = 0.0
+        for character in text:
+            cid = self.character_to_cid.get(character)
+            if cid is not None:
+                total += float(self.advance_em.get(str(cid), 0.0)) * float(fontsize)
+        return total
+
+    def glyph_advance(self, codepoint: int) -> float:
+        try:
+            character = chr(int(codepoint))
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        cid = self.character_to_cid.get(character)
+        if cid is None:
+            return 0.0
+        return float(self.advance_em.get(str(cid), 0.0))
+
+
+def _profiled_type0_source_resource_plan(page, span: dict, font_xref, new_text: str):
+    if font_xref is None:
+        return None
+    resource = None
+    try:
+        for font in page.get_fonts(full=True):
+            if int(font[0]) == int(font_xref):
+                resource = font
+                break
+    except Exception:
+        resource = None
+    if resource is None:
+        return None
+    font_type = str(resource[2] or "")
+    encoding_name = str(resource[5] or "")
+    if font_type != "Type0" or encoding_name != "Identity-H":
+        return None
+    resource_alias = str(resource[4] or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", resource_alias):
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": list(dict.fromkeys(new_text)),
+            "ambiguous_chars": [],
+            "reason": "profiled Type0 resource alias is unavailable or invalid",
+        }
+    buffer = _extract_font_buffer(page, int(font_xref))
+    fingerprint = hashlib.sha256(buffer).hexdigest() if buffer else None
+    profile = _load_font_resource_profiles().get(fingerprint or "")
+    if not isinstance(profile, dict):
+        return None
+    if (
+        profile.get("font_program_sha256") != fingerprint
+        or profile.get("pdf_subtype") != font_type
+        or profile.get("encoding") != encoding_name
+    ):
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": list(dict.fromkeys(new_text)),
+            "ambiguous_chars": [],
+            "reason": "profile metadata does not match the active Type0 font resource",
+        }
+    character_to_cid = profile.get("character_to_cid") or {}
+    advance_em = profile.get("cid_advance_em") or {}
+    unique_characters = list(dict.fromkeys(new_text))
+    missing_chars = [
+        character
+        for character in unique_characters
+        if character not in character_to_cid
+        or str(character_to_cid[character]) not in advance_em
+    ]
+    if missing_chars:
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": missing_chars,
+            "ambiguous_chars": [],
+            "reason": "replacement contains characters absent from the verified Type0 profile",
+            "profile_sha256": fingerprint,
+        }
+    codes = {
+        character: int(character_to_cid[character])
+        for character in unique_characters
+    }
+    if any(code < 0 or code > 0xFFFF for code in codes.values()):
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": unique_characters,
+            "ambiguous_chars": [],
+            "reason": "profile contains a CID outside the Identity-H two-byte range",
+            "profile_sha256": fingerprint,
+        }
+    encoded = b"".join(
+        codes[character].to_bytes(2, "big") for character in new_text
+    )
+    fontsize = float(span.get("size") or 10.0)
+    text_width = sum(
+        float(advance_em[str(codes[character])]) * fontsize
+        for character in new_text
+    )
+    return {
+        "available": True,
+        "font_xref": int(font_xref),
+        "font_type": font_type,
+        "encoding": encoding_name,
+        "resource_alias": resource_alias,
+        "missing_chars": [],
+        "ambiguous_chars": [],
+        "codes": codes,
+        "expected_glyph_ids": [codes[character] for character in new_text],
+        "encoded_hex": encoded.hex(),
+        "font_obj": _ProfiledFontMetrics(character_to_cid, advance_em),
+        "text_width": text_width,
+        "profile_sha256": fingerprint,
+        "profile_name": profile.get("name"),
+    }
+
+
+def _profiled_glyph_sequence_present(page, rect_obj, plan: dict) -> bool:
+    expected = list(plan.get("expected_glyph_ids") or [])
+    if not expected:
+        return True
+    matches = 0
+    try:
+        traces = page.get_texttrace()
+    except Exception:
+        return False
+    expanded = pymupdf.Rect(rect_obj)
+    expanded.x0 -= 3.0
+    expanded.y0 -= 3.0
+    expanded.x1 += 3.0
+    expanded.y1 += 3.0
+    for trace in traces:
+        chars = list(trace.get("chars") or [])
+        glyph_ids = [int(item[1]) for item in chars]
+        if glyph_ids != expected:
+            continue
+        trace_rect = pymupdf.Rect(trace.get("bbox") or (0, 0, 0, 0))
+        if not (trace_rect & expanded).is_empty:
+            matches += 1
+    return matches == 1
 
 
 def _append_page_content_stream(page, stream: bytes):
@@ -2831,7 +3002,12 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
             simple_resource_plan = _simple_source_resource_plan(
                 page, span, font_xref, new_text
             )
-        source_resource_plan = type3_plan or simple_resource_plan
+        profiled_type0_plan = None
+        if type3_plan is None and simple_resource_plan is None:
+            profiled_type0_plan = _profiled_type0_source_resource_plan(
+                page, span, font_xref, new_text
+            )
+        source_resource_plan = type3_plan or simple_resource_plan or profiled_type0_plan
         coverage_ok = False
         missing_chars = []
         if source_resource_plan is not None:
@@ -2856,6 +3032,8 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
             method = "type3-source-resource"
         elif simple_resource_plan is not None and coverage_ok:
             method = "simple-source-resource"
+        elif profiled_type0_plan is not None and coverage_ok:
+            method = "profiled-type0-source-resource"
         elif coverage_ok:
             method = "embedded"
         elif insert_font_name is not None:
@@ -2893,7 +3071,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
 
         # Pick emit font name + measuring font (Stage A / Item #1-#4).
         measured_width = None
-        if method in ("type3-source-resource", "simple-source-resource"):
+        if method in (
+            "type3-source-resource",
+            "simple-source-resource",
+            "profiled-type0-source-resource",
+        ):
             emit_fontname = str(source_resource_plan["resource_alias"])
             measure_font = source_resource_plan.get("font_obj")
             measured_width = float(source_resource_plan["text_width"])
@@ -2965,7 +3147,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         _redraw_strokes(page, strokes_to_restore)
 
         try:
-            if method in ("type3-source-resource", "simple-source-resource"):
+            if method in (
+                "type3-source-resource",
+                "simple-source-resource",
+                "profiled-type0-source-resource",
+            ):
                 _emit_source_resource(
                     page,
                     placement,
@@ -2986,7 +3172,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 )
         except Exception as e:
             print(f"[apply_many] emit failed for edit {idx}: {e}", file=sys.stderr)
-            if method in ("type3-source-resource", "simple-source-resource"):
+            if method in (
+                "type3-source-resource",
+                "simple-source-resource",
+                "profiled-type0-source-resource",
+            ):
                 doc.close()
                 raise ValueError(json.dumps({
                     "error": "SOURCE_RESOURCE_EMIT_FAILED",
@@ -3015,11 +3205,18 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 pass
             method = "embedded-fallback"
 
-        placed = _replacement_text_present(
-            page,
-            placement["redact_rect"],
-            new_text,
-        )
+        if method == "profiled-type0-source-resource":
+            placed = _profiled_glyph_sequence_present(
+                page,
+                placement["redact_rect"],
+                source_resource_plan,
+            )
+        else:
+            placed = _replacement_text_present(
+                page,
+                placement["redact_rect"],
+                new_text,
+            )
         if not placed:
             warning = (
                 f"edit {idx}: replacement text was not extractable after {method}; "
@@ -3061,6 +3258,10 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 "matched": True,
                 "placed": True,
                 "method": str(method or "unknown"),
+                "font_profile_sha256": (
+                    source_resource_plan.get("profile_sha256")
+                    if source_resource_plan is not None else None
+                ),
                 "warning": None,
             }
         )

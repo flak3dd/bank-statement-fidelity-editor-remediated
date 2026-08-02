@@ -24,6 +24,7 @@ Examples:
 import argparse
 import datetime
 import glob
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,8 @@ MONEY = re.compile(r"(-?\$?\s*[\d,]+\.\d{2})")
 MONEY_CORE = re.compile(r"[\d,]+\.\d{2}")
 
 VERBOSE = False
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FONT_PROFILE_PATH = os.path.join(ROOT, "python", "font-resource-profiles.json")
 
 
 def log(msg, indent=2):
@@ -111,12 +114,103 @@ def prepare_edit_input(pdf_path, page, out_root, slug):
         source.close()
 
 
+def _font_program_bytes(document, xref):
+    try:
+        raw = document.extract_font(int(xref))
+    except Exception:
+        return b""
+    if isinstance(raw, dict):
+        return bytes(raw.get("content") or b"")
+    if isinstance(raw, (tuple, list)):
+        for item in reversed(raw):
+            if isinstance(item, (bytes, bytearray)) and item:
+                return bytes(item)
+    return b""
+
+
+def _load_font_profiles():
+    try:
+        with open(FONT_PROFILE_PATH, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    profiles = payload.get("profiles") if payload.get("schema_version") == 1 else None
+    return profiles if isinstance(profiles, dict) else {}
+
+
+def _profiled_amount_span(document):
+    profiles = _load_font_profiles()
+    if not profiles:
+        return None, None, None, None
+    for page_number in range(document.page_count):
+        page = document[page_number]
+        resources = []
+        for resource in page.get_fonts(full=True):
+            xref = int(resource[0])
+            program = _font_program_bytes(document, xref)
+            fingerprint = hashlib.sha256(program).hexdigest() if program else None
+            profile = profiles.get(fingerprint or "")
+            if isinstance(profile, dict):
+                resources.append((resource, profile))
+        if not resources:
+            continue
+        dict_spans = [
+            span
+            for block in page.get_text("dict").get("blocks", [])
+            for line in block.get("lines", [])
+            for span in line.get("spans", [])
+        ]
+        for trace in page.get_texttrace():
+            chars = list(trace.get("chars") or [])
+            if not chars:
+                continue
+            profile = None
+            for resource, candidate in resources:
+                if candidate.get("font_trace_name") == trace.get("font"):
+                    profile = candidate
+                    break
+            if profile is None:
+                continue
+            cid_to_character = {
+                int(cid): character
+                for character, cid in (profile.get("character_to_cid") or {}).items()
+            }
+            try:
+                decoded = "".join(cid_to_character[int(item[1])] for item in chars)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not MONEY.fullmatch(decoded):
+                continue
+            trace_rect = pymupdf.Rect(trace.get("bbox") or (0, 0, 0, 0))
+            matching_spans = []
+            for span in dict_spans:
+                span_rect = pymupdf.Rect(span.get("bbox") or (0, 0, 0, 0))
+                intersection = trace_rect & span_rect
+                if intersection.is_empty:
+                    continue
+                overlap = (intersection.width * intersection.height) / max(
+                    1e-9, min(trace_rect.width * trace_rect.height, span_rect.width * span_rect.height)
+                )
+                if overlap >= 0.8:
+                    matching_spans.append(span)
+            if len(matching_spans) != 1:
+                continue
+            source_text = str(matching_spans[0].get("text") or "")
+            if not source_text:
+                continue
+            bbox = [round(value, 1) for value in matching_spans[0]["bbox"]]
+            return bbox, source_text, decoded, page_number
+    return None, None, None, None
+
+
 def first_amount_span(pdf_path):
-    """Return (bbox, text, page) for a clean money span anywhere in the doc.
+    """Return (bbox, source_text, visible_text, page) for a money span.
 
     Scans EVERY page (not just page 0) and tries span-level matches first, then
     falls back to a line-level reconstruction (handy when a bank splits an
-    amount across several spans, e.g. some ANZ layouts)."""
+    amount across several spans). A final signed-profile pass handles Type0
+    fonts with deliberately empty ToUnicode maps while preserving the exact raw
+    source span as the edit identity."""
     d = pymupdf.open(pdf_path)
     try:
         # Pass 1: a span that is essentially just a money value (cleanest target).
@@ -132,7 +226,7 @@ def first_amount_span(pdf_path):
                         m = MONEY.fullmatch(t) or MONEY.search(t)
                         if m and len(t) <= 18 and MONEY_CORE.search(t):
                             bbox = [round(v, 1) for v in s["bbox"]]
-                            return bbox, t, pno
+                            return bbox, t, t, pno
         # Pass 2: line-level reconstruction for split amounts.
         for pno in range(d.page_count):
             for b in d[pno].get_text("dict")["blocks"]:
@@ -150,8 +244,8 @@ def first_amount_span(pdf_path):
                         st = s["text"].strip()
                         if MONEY_CORE.search(st) and frag.endswith(st[-4:]):
                             bbox = [round(v, 1) for v in s["bbox"]]
-                            return bbox, st, pno
-        return None, None, None
+                            return bbox, st, frag, pno
+        return _profiled_amount_span(d)
     finally:
         d.close()
 
@@ -198,21 +292,31 @@ def process_pdf(exe, pdf, out_root):
     print(f"\n=== {name} ===", flush=True)
 
     # Step 1+2: locate a money span ("click amount") and craft an edit.
-    bbox, text, page = first_amount_span(pdf)
+    bbox, source_text, visible_text, page = first_amount_span(pdf)
     if not bbox:
         rec["steps"]["locate_amount"] = "NO_MONEY_SPAN"
         rec["status"] = "SKIP"
         log("[SKIP] step 1 locate amount: no money span found", 2)
         return rec
-    digits = MONEY_CORE.search(text).group(0)
+    digits = MONEY_CORE.search(visible_text).group(0)
     try:
         val = float(digits.replace(",", ""))
     except ValueError:
         val = 0.0
     new_val = val + 100.00
-    new_text = text.replace(digits, f"{new_val:,.2f}")
-    rec["steps"]["locate_amount"] = {"bbox": bbox, "text": text, "new_text": new_text, "page": page}
-    log(f"[PASS] step 1 locate amount: {text!r} @ p{page} {bbox} -> {new_text!r}", 2)
+    new_text = visible_text.replace(digits, f"{new_val:,.2f}")
+    rec["steps"]["locate_amount"] = {
+        "bbox": bbox,
+        "source_text": source_text,
+        "visible_text": visible_text,
+        "new_text": new_text,
+        "page": page,
+    }
+    log(
+        f"[PASS] step 1 locate amount: visible={visible_text!r} source={source_text!r} "
+        f"@ p{page} {bbox} -> {new_text!r}",
+        2,
+    )
     edit_input, edit_page, segment = prepare_edit_input(pdf, page, out_root, slug)
     if segment is not None:
         rec["steps"]["segment"] = segment
@@ -226,7 +330,7 @@ def process_pdf(exe, pdf, out_root):
     edited = os.path.join(out_root, f"{slug}_edited.pdf")
     code, edit_log = run(
         exe,
-        ["text", "--input", edit_input, "--output", edited, "--old", text, "--new", new_text,
+        ["text", "--input", edit_input, "--output", edited, "--old", source_text, "--new", new_text,
          "--page", str(edit_page), "--bbox", ",".join(str(v) for v in bbox)],
     )
     applied = code == 0 and os.path.exists(edited)

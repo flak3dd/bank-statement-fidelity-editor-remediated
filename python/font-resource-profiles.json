@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "9ed4d2ca2424d96d2c04cae7ef6d2577d18623672e131f66c22a7fadb3a588d9": {
+      "name": "ANZ Aeonik2.0 Regular money subset",
+      "font_program_sha256": "9ed4d2ca2424d96d2c04cae7ef6d2577d18623672e131f66c22a7fadb3a588d9",
+      "font_base_name": "AAAAAB+Aeonik2.0-Regular",
+      "font_trace_name": "Aeonik2.0-Regular",
+      "pdf_subtype": "Type0",
+      "encoding": "Identity-H",
+      "character_to_cid": {
+        "$": 58,
+        ",": 59,
+        ".": 51,
+        "0": 15,
+        "1": 19,
+        "2": 12,
+        "3": 18,
+        "4": 16,
+        "5": 22,
+        "6": 35,
+        "7": 50,
+        "8": 57,
+        "9": 13
+      },
+      "cid_advance_em": {
+        "12": 0.535,
+        "13": 0.592,
+        "15": 0.617,
+        "16": 0.587,
+        "18": 0.57,
+        "19": 0.318,
+        "22": 0.568,
+        "35": 0.592,
+        "50": 0.512,
+        "51": 0.206,
+        "57": 0.59,
+        "58": 0.607,
+        "59": 0.206
+      },
+      "evidence": {
+        "authorized_fixture": "AU Bank Statements/anz_example.pdf",
+        "alignment_count": 14,
+        "minimum_ocr_native_overlap": 0.9891130004640787,
+        "mapping_conflicts": 0,
+        "required_money_characters_missing": 0
+      }
+    }
+  }
+}
