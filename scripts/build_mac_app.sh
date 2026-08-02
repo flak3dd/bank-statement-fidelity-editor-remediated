@@ -19,5 +19,10 @@ python3 scripts/build_portable_bundle.py \
 
 mkdir -p target/release/artifacts
 tar -C "$OUTPUT" -czf "target/release/artifacts/BankStatementFidelityEditor-${VERSION}-macos-aarch64.tar.gz" BankStatementFidelityEditor.app
-sha256sum "target/release/artifacts/BankStatementFidelityEditor-${VERSION}-macos-aarch64.tar.gz" > "target/release/artifacts/BankStatementFidelityEditor-${VERSION}-macos-aarch64.tar.gz.sha256"
+ARCHIVE="target/release/artifacts/BankStatementFidelityEditor-${VERSION}-macos-aarch64.tar.gz"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+else
+  shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+fi
 printf 'Created unsigned portable bundle: %s\n' "target/release/artifacts/BankStatementFidelityEditor-${VERSION}-macos-aarch64.tar.gz"
