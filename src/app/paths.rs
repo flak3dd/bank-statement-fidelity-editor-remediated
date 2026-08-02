@@ -161,6 +161,12 @@ pub fn resolve_asset_path(path: impl AsRef<Path>) -> PathBuf {
                 return resources.join(path);
             }
         }
+        if let Some(resources) = exe.parent().map(|path| path.join("resources")) {
+            let packaged = resources.join(path);
+            if packaged.exists() {
+                return packaged;
+            }
+        }
     }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))

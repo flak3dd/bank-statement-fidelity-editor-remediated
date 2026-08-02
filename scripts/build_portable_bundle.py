@@ -240,6 +240,31 @@ def build(args: argparse.Namespace) -> Path:
     shutil.copy2(ROOT / "LICENSE", legal_directory / "APPLICATION-LICENSE")
     shutil.copy2(PYTHON_ARTIFACTS, legal_directory / "python-runtime-artifacts.json")
     shutil.copy2(PDFIUM_ARTIFACTS, legal_directory / "pdfium-artifacts.json")
+    shutil.copytree(ROOT / "bank_templates", resources_directory / "bank_templates")
+    shutil.copytree(ROOT / "assets", resources_directory / "assets")
+    (resources_directory / "capabilities.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "offline_core": True,
+                "bundled_python": True,
+                "bundled_pdfium": True,
+                "pymupdf_pro": {
+                    "bundled": True,
+                    "license_required": True,
+                },
+                "local_llm": "unavailable",
+                "font_substitution": "disabled",
+                "typst_reconstruction": "disabled",
+                "signed": False,
+                "notarized": False,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     with tempfile.TemporaryDirectory(prefix="portable-bundle-") as temporary:
         scratch = Path(temporary)

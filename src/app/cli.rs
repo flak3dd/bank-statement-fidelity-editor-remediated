@@ -679,7 +679,8 @@ fn run_doctor(
         print_status(&status, label, &dir.display().to_string());
     }
 
-    let templates = std::fs::read_dir("bank_templates")
+    let template_dir = crate::app::paths::resolve_asset_path("bank_templates");
+    let templates = std::fs::read_dir(&template_dir)
         .map(|d| d.filter_map(|e| e.ok()).count())
         .unwrap_or(0);
     print_status(

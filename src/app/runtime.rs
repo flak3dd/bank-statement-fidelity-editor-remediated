@@ -5172,7 +5172,7 @@ async fn process_job_inner(
                     statement.ensure_canonical_metadata();
 
                     let template_provider = Arc::new(crate::extractors::BankTemplateProvider::new(
-                        std::path::PathBuf::from("bank_templates").as_path(),
+                        crate::app::paths::resolve_asset_path("bank_templates").as_path(),
                         eng.clone(),
                     ));
                     let merger = crate::extractors::HybridMerger::new(vec![
@@ -5280,7 +5280,7 @@ async fn process_job_inner(
                 // If both AI services are available, use the full smart engine
                 if let (Some(doc_ai), Some(gemini)) = (doc_ai, gemini) {
                     let template_provider = Arc::new(crate::extractors::BankTemplateProvider::new(
-                        std::path::PathBuf::from("bank_templates").as_path(),
+                        crate::app::paths::resolve_asset_path("bank_templates").as_path(),
                         eng.clone(),
                     ));
 
@@ -6234,7 +6234,7 @@ async fn process_job_inner(
                 if let (Some(doc_ai), Some(gemini)) = (doc_ai, gemini) {
                     // -- Online: full smart engine ----------------------
                     let template_provider = Arc::new(crate::extractors::BankTemplateProvider::new(
-                        std::path::PathBuf::from("bank_templates").as_path(),
+                        crate::app::paths::resolve_asset_path("bank_templates").as_path(),
                         eng.clone(),
                     ));
                     let merger = Arc::new(crate::extractors::HybridMerger::new(vec![
@@ -7162,7 +7162,7 @@ async fn process_job_inner(
                 let template_row_count = {
                     let eng = engine_for_tokio.clone();
                     let path = input.clone();
-                    let templates_dir = std::path::PathBuf::from("bank_templates");
+                    let templates_dir = crate::app::paths::resolve_asset_path("bank_templates");
                     tokio::task::spawn_blocking(move || {
                         let provider = crate::extractors::BankTemplateProvider::new(
                             templates_dir.as_path(),
@@ -8318,7 +8318,7 @@ async fn process_job_inner(
                 let eng_for_learn = eng.clone();
                 tokio::task::spawn_blocking(move || {
                     use crate::extractors::GeometryProvider;
-                    let templates_dir = std::path::PathBuf::from("bank_templates");
+                    let templates_dir = crate::app::paths::resolve_asset_path("bank_templates");
                     let provider = crate::extractors::BankTemplateProvider::new(
                         templates_dir.as_path(),
                         eng_for_learn,
