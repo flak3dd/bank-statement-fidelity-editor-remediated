@@ -424,9 +424,10 @@ def main():
         if isinstance(loc, dict):
             ap_ = s.get("apply_edit", {})
             pd = s.get("pixel_diff", {})
+            displayed_old_text = loc.get("visible_text", loc.get("text"))
             lines.append(
                 f"[{r['status']:4}] {os.path.basename(r['pdf'])}: "
-                f"edit {loc['text']!r}->{loc['new_text']!r} | "
+                f"edit {displayed_old_text!r}->{loc['new_text']!r} | "
                 f"applied={ap_.get('ok')} | changed={pd.get('changed_pct')}% "
                 f"bbox={pd.get('diff_bbox')}"
             )

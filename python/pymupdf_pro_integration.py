@@ -746,7 +746,12 @@ def _median(values):
     return (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
-def _type3_source_resource_plan(page, span: dict, new_text: str):
+def _type3_source_resource_plan(
+    page,
+    span: dict,
+    new_text: str,
+    source_text: str | None = None,
+):
     """Return a fail-closed same-resource Type3 emission plan or ``None``.
 
     Type3 fonts have no extractable TTF/CFF program, so the normal embedded-font
@@ -813,7 +818,7 @@ def _type3_source_resource_plan(page, span: dict, new_text: str):
             if advance > 0.0:
                 advance_samples.setdefault(character, []).append(advance)
 
-    unique_characters = list(dict.fromkeys(new_text))
+    unique_characters = list(dict.fromkeys((source_text or "") + new_text))
     missing_chars = [character for character in unique_characters if not code_sets.get(character)]
     ambiguous_chars = [
         character for character in unique_characters if len(code_sets.get(character, ())) != 1
@@ -835,6 +840,10 @@ def _type3_source_resource_plan(page, span: dict, new_text: str):
     codes = {character: next(iter(code_sets[character])) for character in unique_characters}
     advances = {character: _median(advance_samples[character]) for character in unique_characters}
     encoded = bytes(codes[character] for character in new_text)
+    source_encoded = (
+        bytes(codes[character] for character in source_text)
+        if source_text else None
+    )
     return {
         "available": True,
         "font_xref": font_xref,
@@ -845,8 +854,94 @@ def _type3_source_resource_plan(page, span: dict, new_text: str):
         "codes": codes,
         "advances": advances,
         "encoded_hex": encoded.hex(),
+        "source_encoded_hex": source_encoded.hex() if source_encoded is not None else None,
         "text_width": sum(advances[character] for character in new_text),
     }
+
+
+def _replace_type3_inplace(page, span: dict, rect_obj, plan: dict, old_text: str, new_text: str):
+    old_codes = bytes.fromhex(str(plan.get("source_encoded_hex") or ""))
+    new_codes = bytes.fromhex(str(plan.get("encoded_hex") or ""))
+    if not old_codes or not new_codes:
+        raise ValueError("TYPE3_INPLACE_CODES_MISSING")
+    font_name = str(plan.get("font_name") or span.get("font") or "")
+    alias = str(plan.get("resource_alias") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", alias):
+        raise ValueError("TYPE3_INPLACE_ALIAS_INVALID")
+
+    target_sequences = []
+    for trace in page.get_texttrace():
+        if str(trace.get("font") or "") != font_name:
+            continue
+        chars = list(trace.get("chars") or [])
+        glyphs = bytes(int(item[1]) for item in chars)
+        start = 0
+        while True:
+            index = glyphs.find(old_codes, start)
+            if index < 0:
+                break
+            selected = chars[index:index + len(old_codes)]
+            sequence_rect = pymupdf.Rect(selected[0][3])
+            for item in selected[1:]:
+                sequence_rect |= pymupdf.Rect(item[3])
+            if not (sequence_rect & rect_obj).is_empty:
+                target_sequences.append({"trace": trace, "bbox": sequence_rect})
+            start = index + 1
+    if len(target_sequences) != 1:
+        raise ValueError(f"TYPE3_INPLACE_TARGET_TRACE_COUNT:{len(target_sequences)}")
+
+    document = page.parent
+    stream_matches = []
+    font_pattern = re.compile(rb"/([A-Za-z0-9_.-]+)\s+([0-9.]+)\s+Tf")
+    for content_xref in page.get_contents():
+        stream = document.xref_stream(int(content_xref)) or b""
+        start = 0
+        while True:
+            offset = stream.find(old_codes, start)
+            if offset < 0:
+                break
+            active_fonts = list(font_pattern.finditer(stream[:offset]))
+            if active_fonts and active_fonts[-1].group(1).decode("ascii") == alias:
+                stream_matches.append({
+                    "xref": int(content_xref),
+                    "offset": offset,
+                    "stream": stream,
+                    "font_size": float(active_fonts[-1].group(2)),
+                })
+            start = offset + 1
+    if len(stream_matches) != 1:
+        raise ValueError(f"TYPE3_INPLACE_STREAM_MATCH_COUNT:{len(stream_matches)}")
+
+    match = stream_matches[0]
+    stream = match["stream"]
+    offset = int(match["offset"])
+    tail = offset + len(old_codes)
+    if offset < 1 or stream[offset - 1:offset] != b"(" or stream[tail:tail + 3] != b")Tj":
+        raise ValueError("TYPE3_INPLACE_LITERAL_OPERATOR_REQUIRED")
+    trace_size = float(
+        target_sequences[0]["trace"].get("size")
+        or span.get("size")
+        or 1.0
+    )
+    content_font_size = float(match["font_size"])
+    if content_font_size <= 0.0 or trace_size <= 0.0:
+        raise ValueError("TYPE3_INPLACE_FONT_SIZE_INVALID")
+    content_to_page_scale = trace_size / content_font_size
+    advances = plan.get("advances") or {}
+    old_width = sum(float(advances[character]) for character in old_text)
+    new_width = sum(float(advances[character]) for character in new_text)
+    shift_content_units = (new_width - old_width) / content_to_page_scale
+    shift = f"{-shift_content_units:.8f} 0 Td\n".encode("ascii")
+    restore = f"{shift_content_units:.8f} 0 Td\n".encode("ascii")
+    updated = (
+        stream[:offset - 1]
+        + shift
+        + b"<" + new_codes.hex().encode("ascii") + b"> Tj\n"
+        + restore
+        + stream[tail + 3:]
+    )
+    document.update_stream(int(match["xref"]), updated, compress=True)
+    return int(match["xref"])
 
 
 def _glyph_name_character(name: str):
@@ -1001,6 +1096,123 @@ def _simple_source_resource_plan(page, span: dict, font_xref, new_text: str):
     }
 
 
+def _one_byte_same_length_plan(page, span: dict, font_xref, old_text: str, new_text: str):
+    if font_xref is None or len(old_text) != len(new_text):
+        return None
+    resource = None
+    try:
+        for font in page.get_fonts(full=True):
+            if int(font[0]) == int(font_xref):
+                resource = font
+                break
+    except Exception:
+        resource = None
+    if resource is None:
+        return None
+    encoding_name = str(resource[5] or "")
+    codec = (
+        "mac_roman" if "MacRomanEncoding" in encoding_name
+        else "cp1252" if "WinAnsiEncoding" in encoding_name
+        else None
+    )
+    if codec is None:
+        return None
+    try:
+        source_bytes = old_text.encode(codec)
+        replacement_bytes = new_text.encode(codec)
+    except UnicodeEncodeError:
+        return None
+    if len(source_bytes) != len(replacement_bytes):
+        return None
+    resource_alias = str(resource[4] or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", resource_alias):
+        return None
+    coverage_ok, missing_chars = _font_covers_text(
+        page,
+        int(font_xref),
+        str(span.get("font") or ""),
+        new_text,
+    )
+    if not coverage_ok:
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": missing_chars,
+            "ambiguous_chars": [],
+            "reason": "one-byte source font does not cover the replacement",
+        }
+    font_pattern = re.compile(rb"/([A-Za-z0-9_.-]+)\s+([0-9.]+)\s+Tf")
+    proven_matches = 0
+    for content_xref in page.get_contents():
+        stream = page.parent.xref_stream(int(content_xref)) or b""
+        start = 0
+        while True:
+            offset = stream.find(source_bytes, start)
+            if offset < 0:
+                break
+            active_fonts = list(font_pattern.finditer(stream[:offset]))
+            tail = offset + len(source_bytes)
+            literal = (
+                offset > 0
+                and stream[offset - 1:offset] == b"("
+                and stream[tail:tail + 3] == b")Tj"
+            )
+            if active_fonts and active_fonts[-1].group(1).decode("ascii") == resource_alias and literal:
+                proven_matches += 1
+            start = offset + 1
+    if proven_matches != 1:
+        return None
+    return {
+        "available": True,
+        "font_xref": int(font_xref),
+        "font_type": str(resource[2] or ""),
+        "encoding": encoding_name,
+        "resource_alias": resource_alias,
+        "missing_chars": [],
+        "ambiguous_chars": [],
+        "source_encoded_hex": source_bytes.hex(),
+        "encoded_hex": replacement_bytes.hex(),
+        "font_obj": None,
+        "text_width": float(pymupdf.Rect(span.get("bbox") or (0, 0, 0, 0)).width),
+        "proven_stream_match_count": proven_matches,
+    }
+
+
+def _replace_one_byte_same_length_inplace(page, plan: dict):
+    old_bytes = bytes.fromhex(str(plan.get("source_encoded_hex") or ""))
+    new_bytes = bytes.fromhex(str(plan.get("encoded_hex") or ""))
+    alias = str(plan.get("resource_alias") or "")
+    if not old_bytes or len(old_bytes) != len(new_bytes):
+        raise ValueError("ONE_BYTE_INPLACE_LENGTH_MISMATCH")
+    font_pattern = re.compile(rb"/([A-Za-z0-9_.-]+)\s+([0-9.]+)\s+Tf")
+    matches = []
+    document = page.parent
+    for content_xref in page.get_contents():
+        stream = document.xref_stream(int(content_xref)) or b""
+        start = 0
+        while True:
+            offset = stream.find(old_bytes, start)
+            if offset < 0:
+                break
+            active_fonts = list(font_pattern.finditer(stream[:offset]))
+            tail = offset + len(old_bytes)
+            literal = (
+                offset > 0
+                and stream[offset - 1:offset] == b"("
+                and stream[tail:tail + 3] == b")Tj"
+            )
+            if active_fonts and active_fonts[-1].group(1).decode("ascii") == alias and literal:
+                matches.append((int(content_xref), offset, stream))
+            start = offset + 1
+    if len(matches) != 1:
+        raise ValueError(f"ONE_BYTE_INPLACE_MATCH_COUNT:{len(matches)}")
+    content_xref, offset, stream = matches[0]
+    updated = stream[:offset] + new_bytes + stream[offset + len(old_bytes):]
+    document.update_stream(content_xref, updated, compress=True)
+    return content_xref
+
+
 def _load_font_resource_profiles():
     global _FONT_RESOURCE_PROFILES
     if _FONT_RESOURCE_PROFILES is not None:
@@ -1041,7 +1253,13 @@ class _ProfiledFontMetrics:
         return float(self.advance_em.get(str(cid), 0.0))
 
 
-def _profiled_type0_source_resource_plan(page, span: dict, font_xref, new_text: str):
+def _profiled_type0_source_resource_plan(
+    page,
+    span: dict,
+    font_xref,
+    new_text: str,
+    source_text: str | None = None,
+):
     if font_xref is None:
         return None
     resource = None
@@ -1122,7 +1340,24 @@ def _profiled_type0_source_resource_plan(page, span: dict, font_xref, new_text: 
     encoded = b"".join(
         codes[character].to_bytes(2, "big") for character in new_text
     )
+    source_codes = None
+    if source_text:
+        if all(character in character_to_cid for character in source_text):
+            source_codes = [int(character_to_cid[character]) for character in source_text]
+        elif all(ord(character) <= 0xFFFF for character in source_text):
+            # Empty-ToUnicode Identity-H fonts may expose their raw CIDs as
+            # control-code characters in the matched dict span (for example
+            # the ANZ fixture). Preserve those exact source codes.
+            source_codes = [ord(character) for character in source_text]
+    source_encoded = None
+    source_text_width = None
+    if source_codes is not None:
+        source_encoded = b"".join(code.to_bytes(2, "big") for code in source_codes)
     fontsize = float(span.get("size") or 10.0)
+    if source_codes is not None and all(str(code) in advance_em for code in source_codes):
+        source_text_width = sum(
+            float(advance_em[str(code)]) * fontsize for code in source_codes
+        )
     text_width = sum(
         float(advance_em[str(codes[character])]) * fontsize
         for character in new_text
@@ -1138,6 +1373,8 @@ def _profiled_type0_source_resource_plan(page, span: dict, font_xref, new_text: 
         "codes": codes,
         "expected_glyph_ids": [codes[character] for character in new_text],
         "encoded_hex": encoded.hex(),
+        "source_encoded_hex": source_encoded.hex() if source_encoded is not None else None,
+        "source_text_width": source_text_width,
         "font_obj": _ProfiledFontMetrics(character_to_cid, advance_em),
         "text_width": text_width,
         "profile_sha256": fingerprint,
@@ -1168,6 +1405,70 @@ def _profiled_glyph_sequence_present(page, rect_obj, plan: dict) -> bool:
         if not (trace_rect & expanded).is_empty:
             matches += 1
     return matches == 1
+
+
+def _replace_profiled_type0_inplace(page, span: dict, plan: dict):
+    old_hex = str(plan.get("source_encoded_hex") or "").encode("ascii")
+    new_hex = str(plan.get("encoded_hex") or "").encode("ascii")
+    if not old_hex or not new_hex:
+        raise ValueError("PROFILED_TYPE0_INPLACE_CODES_MISSING")
+    alias = str(plan.get("resource_alias") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", alias):
+        raise ValueError("PROFILED_TYPE0_INPLACE_ALIAS_INVALID")
+    font_pattern = re.compile(rb"/([A-Za-z0-9_.-]+)\s+([0-9.]+)\s+Tf")
+    matches = []
+    document = page.parent
+    for content_xref in page.get_contents():
+        stream = document.xref_stream(int(content_xref)) or b""
+        searchable = stream.lower()
+        start = 0
+        while True:
+            offset = searchable.find(old_hex.lower(), start)
+            if offset < 0:
+                break
+            active_fonts = list(font_pattern.finditer(stream[:offset]))
+            if active_fonts and active_fonts[-1].group(1).decode("ascii") == alias:
+                matches.append((
+                    int(content_xref),
+                    offset,
+                    stream,
+                    float(active_fonts[-1].group(2)),
+                ))
+            start = offset + 1
+    if len(matches) != 1:
+        raise ValueError(f"PROFILED_TYPE0_INPLACE_MATCH_COUNT:{len(matches)}")
+    content_xref, offset, stream, content_font_size = matches[0]
+    source_slice = stream[offset:offset + len(old_hex)]
+    replacement = new_hex.upper() if source_slice.isupper() else new_hex.lower()
+    if len(old_hex) == len(new_hex):
+        updated = stream[:offset] + replacement + stream[offset + len(old_hex):]
+    else:
+        source_width = plan.get("source_text_width")
+        new_width = plan.get("text_width")
+        if source_width is None or new_width is None or content_font_size <= 0.0:
+            raise ValueError("PROFILED_TYPE0_INPLACE_WIDTH_EVIDENCE_MISSING")
+        if offset < 1 or stream[offset - 1:offset] != b"<":
+            raise ValueError("PROFILED_TYPE0_INPLACE_HEX_OPERATOR_REQUIRED")
+        tail = offset + len(old_hex)
+        operator = re.match(rb">\s*Tj", stream[tail:tail + 12])
+        if not operator:
+            raise ValueError("PROFILED_TYPE0_INPLACE_TJ_REQUIRED")
+        trace_size = float(span.get("size") or 0.0)
+        if trace_size <= 0.0:
+            raise ValueError("PROFILED_TYPE0_INPLACE_TRACE_SIZE_INVALID")
+        content_to_page_scale = trace_size / content_font_size
+        shift_content_units = (float(new_width) - float(source_width)) / content_to_page_scale
+        shift = f"{-shift_content_units:.8f} 0 Td\n".encode("ascii")
+        restore = f"{shift_content_units:.8f} 0 Td\n".encode("ascii")
+        updated = (
+            stream[:offset - 1]
+            + shift
+            + b"<" + replacement + b"> Tj\n"
+            + restore
+            + stream[tail + operator.end():]
+        )
+    document.update_stream(content_xref, updated, compress=True)
+    return content_xref
 
 
 def _append_page_content_stream(page, stream: bytes):
@@ -1422,19 +1723,24 @@ def classify_background(page, rect_obj):
     page_h = float(page.rect.height)
     cx = (rect_obj.x0 + rect_obj.x1) / 2.0
     cy = (rect_obj.y0 + rect_obj.y1) / 2.0
+    # `_sample_patch` uses a 1.5 pt half-width. A 1 pt offset therefore lets
+    # every sample patch overlap the glyph box by 0.5 pt; tight bold amount
+    # spans can contaminate all edge samples and turn a white cell black.
+    # Keep the full patch outside the target with a conservative 3 pt gap.
+    outside = 3.0
 
     sample_points = [
         # top-left, top-mid, top-right
-        (rect_obj.x0 - 1.0, rect_obj.y0 - 1.0),
-        (cx, rect_obj.y0 - 1.0),
-        (rect_obj.x1 + 1.0, rect_obj.y0 - 1.0),
+        (rect_obj.x0 - outside, rect_obj.y0 - outside),
+        (cx, rect_obj.y0 - outside),
+        (rect_obj.x1 + outside, rect_obj.y0 - outside),
         # mid row outside left/right
-        (rect_obj.x0 - 1.0, cy),
-        (rect_obj.x1 + 1.0, cy),
+        (rect_obj.x0 - outside, cy),
+        (rect_obj.x1 + outside, cy),
         # bottom-left, bottom-mid, bottom-right
-        (rect_obj.x0 - 1.0, rect_obj.y1 + 1.0),
-        (cx, rect_obj.y1 + 1.0),
-        (rect_obj.x1 + 1.0, rect_obj.y1 + 1.0),
+        (rect_obj.x0 - outside, rect_obj.y1 + outside),
+        (cx, rect_obj.y1 + outside),
+        (rect_obj.x1 + outside, rect_obj.y1 + outside),
     ]
     samples = []
     for x, y in sample_points:
@@ -1472,7 +1778,7 @@ def classify_background(page, rect_obj):
 
     # 2 clusters and roughly evenly split → striped.
     if len(clusters) == 2:
-        return ("striped", centre_color)
+        return ("striped", edge_color)
 
     return ("patterned", centre_color)
 
@@ -2996,7 +3302,9 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         original_font_name = span.get("font", "helv")
 
         font_xref = _embedded_font_xref_for_span(page, span)
-        type3_plan = _type3_source_resource_plan(page, span, new_text)
+        type3_plan = _type3_source_resource_plan(
+            page, span, new_text, source_text=old_text
+        )
         simple_resource_plan = None
         if type3_plan is None:
             simple_resource_plan = _simple_source_resource_plan(
@@ -3005,9 +3313,19 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         profiled_type0_plan = None
         if type3_plan is None and simple_resource_plan is None:
             profiled_type0_plan = _profiled_type0_source_resource_plan(
-                page, span, font_xref, new_text
+                page, span, font_xref, new_text, source_text=old_text
             )
-        source_resource_plan = type3_plan or simple_resource_plan or profiled_type0_plan
+        one_byte_plan = None
+        if type3_plan is None and simple_resource_plan is None and profiled_type0_plan is None:
+            one_byte_plan = _one_byte_same_length_plan(
+                page, span, font_xref, old_text, new_text
+            )
+        source_resource_plan = (
+            type3_plan
+            or simple_resource_plan
+            or profiled_type0_plan
+            or one_byte_plan
+        )
         coverage_ok = False
         missing_chars = []
         if source_resource_plan is not None:
@@ -3029,11 +3347,17 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         method = None
         supplied_measure_font = None
         if type3_plan is not None and coverage_ok:
-            method = "type3-source-resource"
+            method = "type3-inplace-stream"
         elif simple_resource_plan is not None and coverage_ok:
             method = "simple-source-resource"
         elif profiled_type0_plan is not None and coverage_ok:
-            method = "profiled-type0-source-resource"
+            source_hex = str(profiled_type0_plan.get("source_encoded_hex") or "")
+            if source_hex and profiled_type0_plan.get("source_text_width") is not None:
+                method = "profiled-type0-inplace-stream"
+            else:
+                method = "profiled-type0-source-resource"
+        elif one_byte_plan is not None and coverage_ok:
+            method = "one-byte-inplace-stream"
         elif coverage_ok:
             method = "embedded"
         elif insert_font_name is not None:
@@ -3073,8 +3397,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         measured_width = None
         if method in (
             "type3-source-resource",
+            "type3-inplace-stream",
             "simple-source-resource",
             "profiled-type0-source-resource",
+            "profiled-type0-inplace-stream",
+            "one-byte-inplace-stream",
         ):
             emit_fontname = str(source_resource_plan["resource_alias"])
             measure_font = source_resource_plan.get("font_obj")
@@ -3110,6 +3437,194 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
             supplied_font=measure_font,
             measured_width=measured_width,
         )
+
+        if method == "type3-inplace-stream":
+            try:
+                _replace_type3_inplace(
+                    page,
+                    span,
+                    placement["redact_rect"],
+                    source_resource_plan,
+                    old_text,
+                    new_text,
+                )
+                page = doc.reload_page(page)
+            except Exception as error:
+                doc.close()
+                raise ValueError(json.dumps({
+                    "error": "TYPE3_INPLACE_FAILED",
+                    "edit_index": idx,
+                    "original_font": original_font_name,
+                    "method": method,
+                    "reason": str(error),
+                }))
+            placed = _replacement_text_present(
+                page,
+                placement["redact_rect"],
+                new_text,
+            )
+            if not placed:
+                warning = (
+                    f"edit {idx}: Type3 in-place replacement verification failed; "
+                    "source preserved and no output published"
+                )
+                warnings.append(warning)
+                review_flag_pages.add(page_num)
+                evidence.append({
+                    "index": idx,
+                    "page": page_num,
+                    "rect": [float(value) for value in rect],
+                    "matched": True,
+                    "placed": False,
+                    "method": method,
+                    "warning": warning,
+                })
+                _complete_failed_edit_evidence(
+                    edits,
+                    evidence,
+                    idx,
+                    f"not attempted after edit {idx} failed Type3 in-place verification",
+                )
+                doc.close()
+                return _build_apply_report(
+                    edits,
+                    source_sha256,
+                    evidence,
+                    warnings,
+                    review_flag_pages,
+                )
+            evidence.append({
+                "index": idx,
+                "page": page_num,
+                "rect": [float(value) for value in rect],
+                "matched": True,
+                "placed": True,
+                "method": method,
+                "font_profile_sha256": None,
+                "warning": None,
+            })
+            continue
+
+        if method == "one-byte-inplace-stream":
+            try:
+                _replace_one_byte_same_length_inplace(page, source_resource_plan)
+                page = doc.reload_page(page)
+            except Exception as error:
+                doc.close()
+                raise ValueError(json.dumps({
+                    "error": "ONE_BYTE_INPLACE_FAILED",
+                    "edit_index": idx,
+                    "original_font": original_font_name,
+                    "method": method,
+                    "reason": str(error),
+                }))
+            placed = _replacement_text_present(
+                page,
+                placement["redact_rect"],
+                new_text,
+            )
+            if not placed:
+                warning = (
+                    f"edit {idx}: one-byte in-place verification failed; "
+                    "source preserved and no output published"
+                )
+                warnings.append(warning)
+                review_flag_pages.add(page_num)
+                evidence.append({
+                    "index": idx,
+                    "page": page_num,
+                    "rect": [float(value) for value in rect],
+                    "matched": True,
+                    "placed": False,
+                    "method": method,
+                    "warning": warning,
+                })
+                _complete_failed_edit_evidence(
+                    edits,
+                    evidence,
+                    idx,
+                    f"not attempted after edit {idx} failed one-byte verification",
+                )
+                doc.close()
+                return _build_apply_report(
+                    edits,
+                    source_sha256,
+                    evidence,
+                    warnings,
+                    review_flag_pages,
+                )
+            evidence.append({
+                "index": idx,
+                "page": page_num,
+                "rect": [float(value) for value in rect],
+                "matched": True,
+                "placed": True,
+                "method": method,
+                "font_profile_sha256": None,
+                "warning": None,
+            })
+            continue
+
+
+        if method == "profiled-type0-inplace-stream":
+            try:
+                _replace_profiled_type0_inplace(page, span, source_resource_plan)
+                page = doc.reload_page(page)
+            except Exception as error:
+                doc.close()
+                raise ValueError(json.dumps({
+                    "error": "PROFILED_TYPE0_INPLACE_FAILED",
+                    "edit_index": idx,
+                    "original_font": original_font_name,
+                    "method": method,
+                    "reason": str(error),
+                }))
+            placed = _profiled_glyph_sequence_present(
+                page,
+                placement["redact_rect"],
+                source_resource_plan,
+            )
+            if not placed:
+                warning = (
+                    f"edit {idx}: in-place CID sequence verification failed; "
+                    "source preserved and no output published"
+                )
+                warnings.append(warning)
+                review_flag_pages.add(page_num)
+                evidence.append({
+                    "index": idx,
+                    "page": page_num,
+                    "rect": [float(value) for value in rect],
+                    "matched": True,
+                    "placed": False,
+                    "method": method,
+                    "warning": warning,
+                })
+                _complete_failed_edit_evidence(
+                    edits,
+                    evidence,
+                    idx,
+                    f"not attempted after edit {idx} failed in-place verification",
+                )
+                doc.close()
+                return _build_apply_report(
+                    edits,
+                    source_sha256,
+                    evidence,
+                    warnings,
+                    review_flag_pages,
+                )
+            evidence.append({
+                "index": idx,
+                "page": page_num,
+                "rect": [float(value) for value in rect],
+                "matched": True,
+                "placed": True,
+                "method": method,
+                "font_profile_sha256": source_resource_plan.get("profile_sha256"),
+                "warning": None,
+            })
+            continue
 
         # Stage 9 / Item #5: per-edit background classification + stroke
         # restoration, same as in replace_text_in_rect. The redaction does
@@ -3266,7 +3781,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
             }
         )
 
-    doc.save(output_path, garbage=4, deflate=True, clean=True)
+    # `clean=True` rewrites every page content stream and can alter rendering
+    # of untouched text that shares a subset font with the target. Keep secure
+    # garbage collection and stream compression, but preserve untouched stream
+    # operators byte-for-byte for exact visual locality.
+    doc.save(output_path, garbage=4, deflate=True, clean=False)
     doc.close()
     del doc
     gc.collect()

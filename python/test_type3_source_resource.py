@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pymupdf
 
 
@@ -97,7 +98,7 @@ class Type3SourceResourceTests(unittest.TestCase):
         self.assertEqual(report["matched"], 1)
         self.assertEqual(report["placed"], 1)
         self.assertEqual(report["failed"], 0)
-        self.assertEqual(report["method_per_edit"], ["type3-source-resource"])
+        self.assertEqual(report["method_per_edit"], ["type3-inplace-stream"])
         self.assertEqual(report["review_flags"], [])
         self.assertTrue(report["output_published"])
         self.assertEqual(report["source_sha256"], self.source_hash)
@@ -117,12 +118,29 @@ class Type3SourceResourceTests(unittest.TestCase):
             output_type3 = {(font[3], font[4]) for font in output_fonts if font[2] == "Type3"}
             self.assertTrue(source_type3.issubset(output_type3))
 
+        with pymupdf.open(self.segment) as source, pymupdf.open(output) as edited:
+            scale = 240 / 72
+            before = source[0].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            after = edited[0].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            before_array = np.frombuffer(before.samples, dtype=np.uint8).reshape(before.height, before.width, before.n)[:, :, :3]
+            after_array = np.frombuffer(after.samples, dtype=np.uint8).reshape(after.height, after.width, after.n)[:, :, :3]
+            changed = np.any(np.abs(before_array.astype(np.int16) - after_array.astype(np.int16)) > 4, axis=2)
+            expanded = pymupdf.Rect(self.target)
+            expanded.x0 -= 18
+            expanded.y0 -= 12
+            expanded.x1 += 12
+            expanded.y1 += 12
+            target = [int(round(value * scale)) for value in expanded]
+            mask = np.zeros_like(changed)
+            mask[target[1]:target[3], target[0]:target[2]] = True
+            self.assertEqual(int(np.logical_and(changed, ~mask).sum()), 0)
+
     def test_real_type3_edit_is_repeatable(self):
         outputs = [self.directory / "edited_a.pdf", self.directory / "edited_b.pdf"]
         reports = [self.edit(output) for output in outputs]
         for report in reports:
             self.assertTrue(report["success"], report)
-            self.assertEqual(report["method_per_edit"], ["type3-source-resource"])
+            self.assertEqual(report["method_per_edit"], ["type3-inplace-stream"])
         with pymupdf.open(outputs[0]) as first, pymupdf.open(outputs[1]) as second:
             self.assertEqual(first.page_count, second.page_count)
             self.assertEqual(first[0].get_text("text"), second[0].get_text("text"))
