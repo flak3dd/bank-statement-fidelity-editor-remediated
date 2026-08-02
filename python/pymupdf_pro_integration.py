@@ -847,6 +847,158 @@ def _type3_source_resource_plan(page, span: dict, new_text: str):
     }
 
 
+def _glyph_name_character(name: str):
+    standard = {
+        "space": " ", "dollar": "$", "period": ".", "comma": ",",
+        "hyphen": "-", "minus": "-", "plus": "+", "parenleft": "(",
+        "parenright": ")", "zero": "0", "one": "1", "two": "2",
+        "three": "3", "four": "4", "five": "5", "six": "6",
+        "seven": "7", "eight": "8", "nine": "9",
+    }
+    if name in standard:
+        return standard[name]
+    converter = getattr(pymupdf, "glyph_name_to_unicode", None)
+    if converter is None:
+        return None
+    try:
+        value = converter(name)
+        if isinstance(value, int) and 0 <= value <= 0x10FFFF:
+            return chr(value)
+        if isinstance(value, str) and len(value) == 1:
+            return value
+    except Exception:
+        return None
+    return None
+
+
+def _winansi_code_map(document, font_xref: int):
+    code_to_character = {}
+    for code in range(256):
+        try:
+            code_to_character[code] = bytes([code]).decode("cp1252")
+        except UnicodeDecodeError:
+            continue
+
+    try:
+        encoding_type, encoding_value = document.xref_get_key(font_xref, "Encoding")
+    except Exception:
+        encoding_type, encoding_value = "", ""
+    encoding_object = str(encoding_value or "")
+    if encoding_type == "xref":
+        match = re.match(r"\s*(\d+)\s+0\s+R", encoding_object)
+        if match:
+            try:
+                encoding_object = document.xref_object(int(match.group(1)), compressed=False)
+            except Exception:
+                encoding_object = ""
+
+    differences = re.search(r"/Differences\s*\[(.*?)\]", encoding_object, re.DOTALL)
+    if differences:
+        current_code = None
+        for token in re.findall(r"/[^\s\[\]<>]+|[-+]?\d+", differences.group(1)):
+            if token.lstrip("+-").isdigit():
+                current_code = int(token)
+                continue
+            if current_code is None or not token.startswith("/"):
+                continue
+            character = _glyph_name_character(token[1:])
+            if character is not None and 0 <= current_code <= 255:
+                code_to_character[current_code] = character
+            current_code += 1
+
+    character_codes = {}
+    for code, character in code_to_character.items():
+        character_codes.setdefault(character, set()).add(code)
+    return character_codes
+
+
+def _simple_source_resource_plan(page, span: dict, font_xref, new_text: str):
+    """Plan exact one-byte emission through an existing WinAnsi font resource.
+
+    This path is for simple TrueType fonts whose embedded subset is valid for
+    rendering but whose extracted cmap cannot be safely re-embedded by PyMuPDF.
+    It reuses the page's original font dictionary, Encoding and ToUnicode map.
+    Characters must map to exactly one source byte and exist in the embedded
+    glyph program; otherwise the operation fails closed or uses an explicitly
+    supplied reviewed font.
+    """
+    if font_xref is None:
+        return None
+    resource = None
+    try:
+        for font in page.get_fonts(full=True):
+            if int(font[0]) == int(font_xref):
+                resource = font
+                break
+    except Exception:
+        resource = None
+    if resource is None:
+        return None
+    font_type = str(resource[2] or "")
+    encoding_name = str(resource[5] or "")
+    if font_type != "TrueType" or "WinAnsiEncoding" not in encoding_name:
+        return None
+    resource_alias = str(resource[4] or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", resource_alias):
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": list(dict.fromkeys(new_text)),
+            "ambiguous_chars": [],
+            "reason": "simple font resource alias is unavailable or invalid",
+        }
+
+    character_codes = _winansi_code_map(page.parent, int(font_xref))
+    unique_characters = list(dict.fromkeys(new_text))
+    missing_chars = [character for character in unique_characters if not character_codes.get(character)]
+    ambiguous_chars = [
+        character for character in unique_characters if len(character_codes.get(character, ())) != 1
+    ]
+    buffer = _extract_font_buffer(page, int(font_xref))
+    font_obj = None
+    if buffer:
+        try:
+            font_obj = pymupdf.Font(fontbuffer=buffer)
+        except Exception:
+            font_obj = None
+    uncovered = []
+    if font_obj is None:
+        uncovered = unique_characters
+    else:
+        uncovered = [
+            character for character in unique_characters
+            if character != " " and not _has_glyph_safe(font_obj, ord(character))
+        ]
+    missing_chars = list(dict.fromkeys(missing_chars + uncovered))
+    if missing_chars or ambiguous_chars:
+        return {
+            "available": False,
+            "font_xref": int(font_xref),
+            "resource_alias": resource_alias,
+            "missing_chars": missing_chars,
+            "ambiguous_chars": ambiguous_chars,
+            "reason": "source WinAnsi resource does not prove one covered byte per character",
+        }
+
+    codes = {character: next(iter(character_codes[character])) for character in unique_characters}
+    encoded = bytes(codes[character] for character in new_text)
+    fontsize = float(span.get("size") or 10.0)
+    return {
+        "available": True,
+        "font_xref": int(font_xref),
+        "font_type": font_type,
+        "encoding": encoding_name,
+        "resource_alias": resource_alias,
+        "missing_chars": [],
+        "ambiguous_chars": [],
+        "codes": codes,
+        "encoded_hex": encoded.hex(),
+        "font_obj": font_obj,
+        "text_width": float(font_obj.text_length(new_text, fontsize=fontsize)),
+    }
+
+
 def _append_page_content_stream(page, stream: bytes):
     document = page.parent
     content_xref = document.get_new_xref()
@@ -872,15 +1024,15 @@ def _pdf_fill_operator(color) -> str:
     return " ".join(f"{value:.8f}" for value in rgb) + " rg"
 
 
-def _emit_type3_source_resource(page, placement: dict, plan: dict, fontsize: float, color):
+def _emit_source_resource(page, placement: dict, plan: dict, fontsize: float, color):
     if not plan.get("available"):
-        raise ValueError("TYPE3_SOURCE_RESOURCE_UNAVAILABLE")
+        raise ValueError("SOURCE_RESOURCE_UNAVAILABLE")
     writing_dir = placement.get("writing_dir", (1.0, 0.0))
     if abs(float(writing_dir[0]) - 1.0) > 1e-3 or abs(float(writing_dir[1])) > 1e-3:
-        raise ValueError("TYPE3_WRITING_MODE_UNSUPPORTED")
+        raise ValueError("SOURCE_RESOURCE_WRITING_MODE_UNSUPPORTED")
     alias = str(plan.get("resource_alias") or "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", alias):
-        raise ValueError("TYPE3_RESOURCE_ALIAS_INVALID")
+        raise ValueError("SOURCE_RESOURCE_ALIAS_INVALID")
     origin = pymupdf.Point(*placement["origin"])
     try:
         pdf_origin = origin * ~page.transformation_matrix
@@ -2674,11 +2826,17 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
 
         font_xref = _embedded_font_xref_for_span(page, span)
         type3_plan = _type3_source_resource_plan(page, span, new_text)
+        simple_resource_plan = None
+        if type3_plan is None:
+            simple_resource_plan = _simple_source_resource_plan(
+                page, span, font_xref, new_text
+            )
+        source_resource_plan = type3_plan or simple_resource_plan
         coverage_ok = False
         missing_chars = []
-        if type3_plan is not None:
-            coverage_ok = bool(type3_plan.get("available"))
-            missing_chars = list(type3_plan.get("missing_chars") or [])
+        if source_resource_plan is not None:
+            coverage_ok = bool(source_resource_plan.get("available"))
+            missing_chars = list(source_resource_plan.get("missing_chars") or [])
         elif font_xref is not None:
             coverage_ok, missing_chars = _font_covers_text(
                 page, font_xref, original_font_name, new_text
@@ -2689,13 +2847,15 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         # faithfully through the reader's builtin).
         is_std14 = _is_standard_14(original_font_name)
         embedded = None
-        if coverage_ok and not is_std14 and type3_plan is None:
+        if coverage_ok and not is_std14 and source_resource_plan is None:
             embedded = _resolve_embedded_font(page, font_xref)
 
         method = None
         supplied_measure_font = None
         if type3_plan is not None and coverage_ok:
             method = "type3-source-resource"
+        elif simple_resource_plan is not None and coverage_ok:
+            method = "simple-source-resource"
         elif coverage_ok:
             method = "embedded"
         elif insert_font_name is not None:
@@ -2724,17 +2884,19 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 "missing_chars": missing_chars,
                 "new_text": new_text,
             }
-            if type3_plan is not None:
-                err["ambiguous_chars"] = list(type3_plan.get("ambiguous_chars") or [])
-                err["reason"] = str(type3_plan.get("reason") or "")
+            if source_resource_plan is not None:
+                err["ambiguous_chars"] = list(
+                    source_resource_plan.get("ambiguous_chars") or []
+                )
+                err["reason"] = str(source_resource_plan.get("reason") or "")
             raise ValueError(json.dumps(err))
 
         # Pick emit font name + measuring font (Stage A / Item #1-#4).
         measured_width = None
-        if method == "type3-source-resource":
-            emit_fontname = str(type3_plan["resource_alias"])
-            measure_font = None
-            measured_width = float(type3_plan["text_width"])
+        if method in ("type3-source-resource", "simple-source-resource"):
+            emit_fontname = str(source_resource_plan["resource_alias"])
+            measure_font = source_resource_plan.get("font_obj")
+            measured_width = float(source_resource_plan["text_width"])
         elif method == "supplied":
             emit_fontname = insert_font_name
             measure_font = supplied_measure_font
@@ -2803,11 +2965,11 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         _redraw_strokes(page, strokes_to_restore)
 
         try:
-            if method == "type3-source-resource":
-                _emit_type3_source_resource(
+            if method in ("type3-source-resource", "simple-source-resource"):
+                _emit_source_resource(
                     page,
                     placement,
-                    type3_plan,
+                    source_resource_plan,
                     original_size,
                     original_color,
                 )
@@ -2824,12 +2986,13 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 )
         except Exception as e:
             print(f"[apply_many] emit failed for edit {idx}: {e}", file=sys.stderr)
-            if method == "type3-source-resource":
+            if method in ("type3-source-resource", "simple-source-resource"):
                 doc.close()
                 raise ValueError(json.dumps({
-                    "error": "TYPE3_SOURCE_RESOURCE_EMIT_FAILED",
+                    "error": "SOURCE_RESOURCE_EMIT_FAILED",
                     "edit_index": idx,
                     "original_font": original_font_name,
+                    "method": method,
                     "reason": str(e),
                 }))
             warnings.append(f"edit {idx}: primary emit failed, builtin fallback")
