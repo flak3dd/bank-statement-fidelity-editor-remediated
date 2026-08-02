@@ -176,9 +176,10 @@ fn test_cli_ai_fix_visual() {
         .arg("--page")
         .arg("0")
         .assert()
-        // The operation is intentionally a non-mutating stub in v1 and may
-        // return one when optional AI capability is unavailable.
-        .code(predicate::eq(0).or(predicate::eq(1)));
+        .code(2)
+        .stderr(predicate::str::contains(
+            "AI visual layout repair is not available in v1; no document was changed",
+        ));
 }
 
 #[test]

@@ -2131,9 +2131,9 @@ async fn process_job_inner(
             });
         }
         Job::AiFixVisualFidelity { input: _, page: _ } => {
-            let _ = result_tx_clone.send(JobResult::Progress {
-                label: "AI Visual Fidelity Fix (Stub)".to_string(),
-                fraction: 1.0,
+            let _ = result_tx_clone.send(JobResult::Error {
+                job_label: "ai_fix_visual_fidelity".to_string(),
+                message: "AI visual layout repair is not available in v1; no document was changed. Use the deterministic edit and verification workflow.".to_string(),
             });
         }
         Job::TransferTransactions {

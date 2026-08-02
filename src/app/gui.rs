@@ -1429,22 +1429,10 @@ impl MyApp {
                 if let Some(file) = i.raw.dropped_files.first() {
                     if let Some(path) = &file.path {
                         if path.is_dir() {
-                            self.current_view = AppView::BatchProcessing;
-                            self.batch_folder_path = Some(path.clone());
-                            self.batch_files.clear();
-                            if let Ok(entries) = std::fs::read_dir(path) {
-                                for entry in entries.filter_map(|e| e.ok()) {
-                                    let p = entry.path();
-                                    if p.is_file()
-                                        && p.extension()
-                                            .and_then(|s| s.to_str())
-                                            .map(|s| s.to_lowercase())
-                                            == Some("pdf".to_string())
-                                    {
-                                        self.batch_files.push(p);
-                                    }
-                                }
-                            }
+                            self.toast(
+                                ToastKind::Warn,
+                                "Folder batch UI is not included in v1. Use the `extract-batch` CLI command for bounded batch processing.",
+                            );
                         } else if path.is_file()
                             && path
                                 .extension()
@@ -2302,9 +2290,7 @@ impl MyApp {
                 let workflows = [
                     (ActiveWorkflow::EditStatement, "📄", "Editor"),
                     (ActiveWorkflow::TransferTransactions, "⇄", "Transfer"),
-                    (ActiveWorkflow::AgentCommand, "🤖", "Agent"),
-                    (ActiveWorkflow::AuditForensics, "📊", "Forensics"),
-                    (ActiveWorkflow::ChaosSandbox, "🧪", "Chaos Sandbox"),
+                    (ActiveWorkflow::AgentCommand, "⌘", "Commands"),
                     (ActiveWorkflow::Settings, "⚙", "Settings"),
                     (ActiveWorkflow::ApiKeys, "🔑", "API Keys"),
                 ];
@@ -2898,7 +2884,7 @@ impl MyApp {
 
     fn draw_agent_command_workflow(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🤖 Autonomous NLP Agent Command Center");
+            ui.heading("Command Center");
             ui.separator();
             ui.add_space(10.0);
 
@@ -2924,55 +2910,17 @@ impl MyApp {
 
             ui.add_space(20.0);
 
-            // Autonomous mode toggle
             ui.group(|ui| {
-                ui.heading("Autonomous Background Operations");
-                ui.add_space(5.0);
-                ui.label("Enable the agent to scrape templates and train on synthetic data 24/7.");
-                ui.horizontal(|ui| {
-                    ui.label("Status: ");
-                    let color = if self.agent_autonomous_mode { egui::Color32::GREEN } else { egui::Color32::DARK_GRAY };
-                    ui.label(egui::RichText::new(if self.agent_autonomous_mode { "ONLINE" } else { "OFFLINE" }).color(color).strong());
-                    if ui.button(if self.agent_autonomous_mode { "Stop" } else { "Start" }).clicked() {
-                        self.agent_autonomous_mode = !self.agent_autonomous_mode;
-                        if self.agent_autonomous_mode {
-                            self.toast(ToastKind::Success, "Autonomous Agent started.");
-                        } else {
-                            self.toast(ToastKind::Warn, "Autonomous Agent stopped.");
-                        }
-                    }
-                });
-            });
-
-            ui.add_space(20.0);
-
-            // Output log
-            ui.heading("Activity Log");
-            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                ui.group(|ui| {
-                    ui.set_min_height(200.0);
-                    ui.set_width(ui.available_width());
-                    if self.agent_autonomous_mode {
-                        ui.label(egui::RichText::new("> Scraping Scribd for 'CommBank statement'...\n> Found 3 new templates.\n> Training on template 1/3...").family(egui::FontFamily::Monospace).color(egui::Color32::LIGHT_GREEN));
-                    } else {
-                        ui.label(egui::RichText::new("> Agent offline. Waiting for manual instructions...").family(egui::FontFamily::Monospace).color(egui::Color32::GRAY));
-                    }
-                });
+                ui.heading("Manual commands only");
+                ui.label("Background scraping and autonomous model training are not included in v1. Commands run only when you submit them here.");
             });
         });
     }
 
     fn draw_chaos_sandbox_workflow(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🧪 Chaos Testing Sandbox");
-            ui.separator();
-            ui.add_space(10.0);
-            ui.label("This workspace allows you to run adversarial tests against the AI models to verify their robustness against garbage inputs.");
-
-            ui.add_space(20.0);
-            if ui.button("Run Chaos Suite").clicked() {
-                self.toast(ToastKind::Info, "Chaos suite dispatched. Check tests/chaos_tests.rs for unit test parity.");
-            }
+            ui.heading("Controlled test runner unavailable");
+            ui.label("The internal chaos suite is not exposed in the v1 application. No test has been started.");
         });
     }
     fn draw_settings_workflow(&mut self, ctx: &egui::Context) {
@@ -4260,17 +4208,10 @@ impl MyApp {
 
     #[allow(dead_code)]
     fn draw_audit_explorer_view(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(self.settings.theme.palette().bg))
-            .show(ctx, |ui| {
-                ui.add_space(20.0);
-                ui.vertical_centered(|ui| {
-                    ui.heading(egui::RichText::new("Audit Explorer").size(32.0).strong());
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Feature under construction: Interactive history log of all modifications.")
-                        .color(self.settings.theme.palette().weak));
-                });
-            });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Audit Explorer unavailable in v1");
+            ui.label("Use the immutable exported audit and verification evidence. No simulated explorer is provided.");
+        });
     }
 
     fn draw_central_panel(&mut self, ctx: &egui::Context) {
@@ -4667,12 +4608,6 @@ impl MyApp {
 
                                         ui.add_space(8.0);
 
-                                        if ui.add(egui::Button::new(egui::RichText::new("✨ AI Fix Layout").color(p.text)).fill(p.panel).rounding(8.0).min_size(egui::vec2(140.0, 36.0))).on_hover_text("Use Gemini to fix discrepancies on this page").clicked() {
-                                            let input = if self.current_pdf_path.exists() { self.current_pdf_path.clone() } else { std::path::PathBuf::from(&self.input_path) };
-                                            if let Err(e) = self.dispatch_workflow_job(Job::AiFixVisualFidelity { input, page: self.current_page }) { tracing::error!("Runtime disconnected: {}", e); }
-                                            self.toast(ToastKind::Info, "Requesting AI Layout Fix...");
-                                            self.in_flight += 1;
-                                        }
                                     });
 
                                     ui.add_space(12.0);

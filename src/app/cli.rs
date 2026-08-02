@@ -1681,10 +1681,9 @@ pub fn run_inner(
                 _ => Ok(1),
             }
         }
-        Commands::AiFixVisual { input, page } => {
-            let _ = job_tx.send_headless(Job::AiFixVisualFidelity { input, page });
-            println!("AiFixVisualFidelity is a stub.");
-            Ok(0)
+        Commands::AiFixVisual { input: _, page: _ } => {
+            eprintln!("AI visual layout repair is not available in v1; no document was changed. Use the deterministic edit and verification workflow.");
+            Ok(2)
         }
         Commands::TransferTransactions {
             source_pdf,
