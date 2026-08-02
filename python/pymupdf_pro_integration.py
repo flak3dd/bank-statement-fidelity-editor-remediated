@@ -8,6 +8,7 @@ PyMuPDF Pro Smart Targeted Editor v2.1
 
 import hashlib
 import os
+import re
 import sys
 
 # ── Windows DLL search-path fix (must run BEFORE import pymupdf) ─────────────
@@ -704,7 +705,18 @@ def _embedded_font_xref_for_span(page, span: dict):
         return None
     if not fonts:
         return None
-    needle = (span.get("font") or "").lower()
+    raw_name = span.get("font") or ""
+    type3_reference = re.search(r"Type3\s*\((\d+)\s+0\s+R\)", raw_name, re.IGNORECASE)
+    if type3_reference:
+        referenced_xref = int(type3_reference.group(1))
+        for font in fonts:
+            try:
+                if int(font[0]) == referenced_xref:
+                    return referenced_xref
+            except (IndexError, TypeError, ValueError):
+                continue
+
+    needle = raw_name.lower()
     if needle:
         # Match by basefont (index 3) or by the alias name (index 4).
         for f in fonts:
@@ -720,6 +732,173 @@ def _embedded_font_xref_for_span(page, span: dict):
         return fonts[0][0]
     except (IndexError, TypeError):
         return None
+
+
+def _median(values):
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _type3_source_resource_plan(page, span: dict, new_text: str):
+    """Return a fail-closed same-resource Type3 emission plan or ``None``.
+
+    Type3 fonts have no extractable TTF/CFF program, so the normal embedded-font
+    path cannot re-register them. Their existing page resource can still be
+    reused exactly when text tracing proves a unique one-byte source code for
+    every replacement character. No glyph is synthesized and no substitute font
+    is allowed. Ambiguous, missing, multi-byte, or rotated mappings fail closed.
+    """
+    font_name = str(span.get("font") or "")
+    reference = re.search(r"Type3\s*\((\d+)\s+0\s+R\)", font_name, re.IGNORECASE)
+    if not reference:
+        return None
+    font_xref = int(reference.group(1))
+    resource_alias = None
+    try:
+        for font in page.get_fonts(full=True):
+            if int(font[0]) == font_xref:
+                resource_alias = str(font[4] or "")
+                break
+    except Exception:
+        resource_alias = None
+
+    code_sets = {}
+    advance_samples = {}
+    try:
+        traces = page.get_texttrace()
+    except Exception as error:
+        return {
+            "available": False,
+            "font_xref": font_xref,
+            "font_name": font_name,
+            "resource_alias": resource_alias,
+            "missing_chars": list(dict.fromkeys(new_text)),
+            "ambiguous_chars": [],
+            "reason": f"text trace unavailable: {error}",
+        }
+
+    for trace in traces:
+        if str(trace.get("font") or "") != font_name:
+            continue
+        chars = list(trace.get("chars") or [])
+        for index, item in enumerate(chars):
+            try:
+                character = chr(int(item[0]))
+                source_code = int(item[1])
+                origin = item[2]
+                bbox = item[3]
+            except (IndexError, TypeError, ValueError, OverflowError):
+                continue
+            if not 0 <= source_code <= 255:
+                continue
+            code_sets.setdefault(character, set()).add(source_code)
+            advance = max(float(bbox[2]) - float(bbox[0]), 0.0)
+            if index + 1 < len(chars):
+                try:
+                    next_origin = chars[index + 1][2]
+                    same_baseline = abs(float(next_origin[1]) - float(origin[1])) <= 0.25
+                    delta = float(next_origin[0]) - float(origin[0])
+                    trace_size = max(float(trace.get("size") or span.get("size") or 10.0), 1.0)
+                    if same_baseline and 0.0 < delta <= trace_size * 2.5:
+                        advance = delta
+                except (IndexError, TypeError, ValueError):
+                    pass
+            if advance > 0.0:
+                advance_samples.setdefault(character, []).append(advance)
+
+    unique_characters = list(dict.fromkeys(new_text))
+    missing_chars = [character for character in unique_characters if not code_sets.get(character)]
+    ambiguous_chars = [
+        character for character in unique_characters if len(code_sets.get(character, ())) != 1
+    ]
+    missing_advances = [
+        character for character in unique_characters if not advance_samples.get(character)
+    ]
+    if not resource_alias or missing_chars or ambiguous_chars or missing_advances:
+        return {
+            "available": False,
+            "font_xref": font_xref,
+            "font_name": font_name,
+            "resource_alias": resource_alias,
+            "missing_chars": missing_chars or missing_advances,
+            "ambiguous_chars": ambiguous_chars,
+            "reason": "source Type3 resource does not prove one code and advance per character",
+        }
+
+    codes = {character: next(iter(code_sets[character])) for character in unique_characters}
+    advances = {character: _median(advance_samples[character]) for character in unique_characters}
+    encoded = bytes(codes[character] for character in new_text)
+    return {
+        "available": True,
+        "font_xref": font_xref,
+        "font_name": font_name,
+        "resource_alias": resource_alias,
+        "missing_chars": [],
+        "ambiguous_chars": [],
+        "codes": codes,
+        "advances": advances,
+        "encoded_hex": encoded.hex(),
+        "text_width": sum(advances[character] for character in new_text),
+    }
+
+
+def _append_page_content_stream(page, stream: bytes):
+    document = page.parent
+    content_xref = document.get_new_xref()
+    document.update_object(content_xref, "<<>>")
+    document.update_stream(content_xref, stream, compress=True)
+    contents = [int(xref) for xref in page.get_contents()]
+    contents.append(content_xref)
+    document.xref_set_key(
+        page.xref,
+        "Contents",
+        "[" + " ".join(f"{xref} 0 R" for xref in contents) + "]",
+    )
+    return content_xref
+
+
+def _pdf_fill_operator(color) -> str:
+    values = tuple(float(value) for value in color)
+    if len(values) == 1:
+        return f"{values[0]:.8f} g"
+    if len(values) == 4:
+        return " ".join(f"{value:.8f}" for value in values) + " k"
+    rgb = values[:3] if len(values) >= 3 else (0.0, 0.0, 0.0)
+    return " ".join(f"{value:.8f}" for value in rgb) + " rg"
+
+
+def _emit_type3_source_resource(page, placement: dict, plan: dict, fontsize: float, color):
+    if not plan.get("available"):
+        raise ValueError("TYPE3_SOURCE_RESOURCE_UNAVAILABLE")
+    writing_dir = placement.get("writing_dir", (1.0, 0.0))
+    if abs(float(writing_dir[0]) - 1.0) > 1e-3 or abs(float(writing_dir[1])) > 1e-3:
+        raise ValueError("TYPE3_WRITING_MODE_UNSUPPORTED")
+    alias = str(plan.get("resource_alias") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", alias):
+        raise ValueError("TYPE3_RESOURCE_ALIAS_INVALID")
+    origin = pymupdf.Point(*placement["origin"])
+    try:
+        pdf_origin = origin * ~page.transformation_matrix
+    except Exception:
+        pdf_origin = pymupdf.Point(origin.x, float(page.rect.height) - origin.y)
+    char_spacing = float(placement.get("char_spacing", 0.0))
+    horizontal_scale = float(placement.get("h_scale", 1.0)) * 100.0
+    stream = (
+        "q\nBT\n"
+        f"/{alias} {float(fontsize):.8f} Tf\n"
+        f"{char_spacing:.8f} Tc\n"
+        f"{horizontal_scale:.8f} Tz\n"
+        f"{_pdf_fill_operator(color)}\n"
+        f"1 0 0 1 {float(pdf_origin.x):.8f} {float(pdf_origin.y):.8f} Tm\n"
+        f"<{plan['encoded_hex']}> Tj\n"
+        "ET\nQ\n"
+    ).encode("ascii")
+    return _append_page_content_stream(page, stream)
 
 
 # ===========================================================================
@@ -955,8 +1134,18 @@ def classify_background(page, rect_obj):
         clusters.setdefault(quant(s), 0)
         clusters[quant(s)] += 1
 
+    def channel_median(colors):
+        channels = list(zip(*colors))
+        return tuple(_median(channel) for channel in channels)
+
+    # The center of an edit rect usually contains the glyph being replaced.
+    # It is therefore evidence about foreground ink, not background. Use the
+    # outside-edge samples for any solid fill decision; otherwise black text
+    # on a white page becomes a dark redaction rectangle.
+    edge_color = channel_median(samples)
+
     if len(clusters) == 1:
-        return ("solid", centre_color)
+        return ("solid", edge_color)
 
     # 2 clusters and roughly evenly split → striped.
     if len(clusters) == 2:
@@ -1703,6 +1892,7 @@ def _placement_for_edit(
     fontname: str,
     fontsize: float,
     supplied_font=None,
+    measured_width=None,
 ):
     """Compute (origin_point, char_spacing, redaction_rect) for an edit.
     Bundles items #1 (right-align numerics), #2 (width fit + collision),
@@ -1714,7 +1904,11 @@ def _placement_for_edit(
     origin_x, origin_y = span.get("origin") or (rect_obj.x0, rect_obj.y1)
 
     # Measure new text and original text widths.
-    new_w = _measure_text_width(new_text, fontname, fontsize, supplied_font)
+    new_w = (
+        float(measured_width)
+        if measured_width is not None
+        else _measure_text_width(new_text, fontname, fontsize, supplied_font)
+    )
     old_w = float(rect_obj.x1 - rect_obj.x0)
 
     is_numeric = _looks_numeric(new_text)
@@ -2479,9 +2673,13 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         original_font_name = span.get("font", "helv")
 
         font_xref = _embedded_font_xref_for_span(page, span)
+        type3_plan = _type3_source_resource_plan(page, span, new_text)
         coverage_ok = False
         missing_chars = []
-        if font_xref is not None:
+        if type3_plan is not None:
+            coverage_ok = bool(type3_plan.get("available"))
+            missing_chars = list(type3_plan.get("missing_chars") or [])
+        elif font_xref is not None:
             coverage_ok, missing_chars = _font_covers_text(
                 page, font_xref, original_font_name, new_text
             )
@@ -2491,12 +2689,14 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         # faithfully through the reader's builtin).
         is_std14 = _is_standard_14(original_font_name)
         embedded = None
-        if coverage_ok and not is_std14:
+        if coverage_ok and not is_std14 and type3_plan is None:
             embedded = _resolve_embedded_font(page, font_xref)
 
         method = None
         supplied_measure_font = None
-        if coverage_ok:
+        if type3_plan is not None and coverage_ok:
+            method = "type3-source-resource"
+        elif coverage_ok:
             method = "embedded"
         elif insert_font_name is not None:
             try:
@@ -2524,10 +2724,18 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
                 "missing_chars": missing_chars,
                 "new_text": new_text,
             }
+            if type3_plan is not None:
+                err["ambiguous_chars"] = list(type3_plan.get("ambiguous_chars") or [])
+                err["reason"] = str(type3_plan.get("reason") or "")
             raise ValueError(json.dumps(err))
 
         # Pick emit font name + measuring font (Stage A / Item #1-#4).
-        if method == "supplied":
+        measured_width = None
+        if method == "type3-source-resource":
+            emit_fontname = str(type3_plan["resource_alias"])
+            measure_font = None
+            measured_width = float(type3_plan["text_width"])
+        elif method == "supplied":
             emit_fontname = insert_font_name
             measure_font = supplied_measure_font
         elif is_std14:
@@ -2556,6 +2764,7 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
             emit_fontname,
             original_size,
             supplied_font=measure_font,
+            measured_width=measured_width,
         )
 
         # Stage 9 / Item #5: per-edit background classification + stroke
@@ -2594,17 +2803,35 @@ def apply_many_edits(pdf_path: str, output_path: str, edits: list, font_path: st
         _redraw_strokes(page, strokes_to_restore)
 
         try:
-            _insert_text_with_placement(
-                page,
-                placement,
-                new_text,
-                emit_fontname,
-                original_size,
-                original_color,
-                measure_font=measure_font,
-            )
+            if method == "type3-source-resource":
+                _emit_type3_source_resource(
+                    page,
+                    placement,
+                    type3_plan,
+                    original_size,
+                    original_color,
+                )
+                page = doc.reload_page(page)
+            else:
+                _insert_text_with_placement(
+                    page,
+                    placement,
+                    new_text,
+                    emit_fontname,
+                    original_size,
+                    original_color,
+                    measure_font=measure_font,
+                )
         except Exception as e:
             print(f"[apply_many] emit failed for edit {idx}: {e}", file=sys.stderr)
+            if method == "type3-source-resource":
+                doc.close()
+                raise ValueError(json.dumps({
+                    "error": "TYPE3_SOURCE_RESOURCE_EMIT_FAILED",
+                    "edit_index": idx,
+                    "original_font": original_font_name,
+                    "reason": str(e),
+                }))
             warnings.append(f"edit {idx}: primary emit failed, builtin fallback")
             fb = _fallback_standard14(original_font_name)
             # Req 18.6: primary emit failed; the edit is completed via the
