@@ -14,6 +14,7 @@ PYTHON_DIR = ROOT / "python"
 MANIFEST_PATH = PYTHON_DIR / "runtime-manifest.json"
 SOURCE_FILES = (
     "bridge_protocol.py",
+    "font-resource-profiles.json",
     "pymupdf_pro_integration.py",
     "verify_runtime_manifest.py",
     "verify_runtime_versions.py",
