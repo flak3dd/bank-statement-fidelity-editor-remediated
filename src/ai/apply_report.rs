@@ -17,6 +17,8 @@ pub struct ApplyEditEvidence {
     pub placed: bool,
     pub method: String,
     #[serde(default)]
+    pub font_profile_sha256: Option<String>,
+    #[serde(default)]
     pub warning: Option<String>,
 }
 
@@ -114,6 +116,9 @@ impl ApplyReport {
                     "ApplyReport edit {} was placed without a matched target",
                     expected_index
                 )));
+            }
+            if let Some(profile_hash) = evidence.font_profile_sha256.as_deref() {
+                validate_sha256("font_profile_sha256", profile_hash)?;
             }
         }
 
@@ -241,6 +246,7 @@ mod tests {
                 "matched": true,
                 "placed": true,
                 "method": "embedded",
+                "font_profile_sha256": null,
                 "warning": null
             }]
         })
@@ -277,5 +283,20 @@ mod tests {
         value["output_sha256"] = serde_json::Value::Null;
         let error = ApplyReport::from_json_exact(&value.to_string(), 1).unwrap_err();
         assert!(error.to_string().contains("exact success"));
+    }
+
+    #[test]
+    fn validates_optional_font_profile_hash() {
+        let mut value: serde_json::Value = serde_json::from_str(&success_json()).unwrap();
+        value["edits"][0]["font_profile_sha256"] = serde_json::json!("c".repeat(64));
+        let report = ApplyReport::from_json_exact(&value.to_string(), 1).unwrap();
+        assert_eq!(
+            report.edits[0].font_profile_sha256.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+
+        value["edits"][0]["font_profile_sha256"] = serde_json::json!("not-a-hash");
+        let error = ApplyReport::from_json_exact(&value.to_string(), 1).unwrap_err();
+        assert!(error.to_string().contains("font_profile_sha256"));
     }
 }
