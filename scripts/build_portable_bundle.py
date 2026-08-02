@@ -195,17 +195,17 @@ def verify_application(
             [str(executable), "doctor"],
             cwd=working_directory,
             env=environment,
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
         )
+    output = result.stdout.decode("utf-8", errors="replace")
     if result.returncode not in (0, 2):
         raise RuntimeError(
-            f"packaged first-run diagnostics failed ({result.returncode}):\n{result.stdout}"
+            f"packaged first-run diagnostics failed ({result.returncode}):\n{output}"
         )
-    if "Bank templates" not in result.stdout or "0 template(s) found" in result.stdout:
-        raise RuntimeError(f"packaged templates are not discoverable:\n{result.stdout}")
+    if "Bank templates" not in output or "0 template(s) found" in output:
+        raise RuntimeError(f"packaged templates are not discoverable:\n{output}")
 
 
 def write_bundle_manifest(bundle_root: Path, platform_key: str, revision: str, pdfium: dict[str, str]) -> None:
